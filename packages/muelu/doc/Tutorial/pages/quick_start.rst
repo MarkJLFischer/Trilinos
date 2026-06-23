@@ -25,11 +25,11 @@ User interface
 ====================
 
 For this tutorial there is an easy-to-use user interface to perform some experiments with multigrid methods for the given problem as described in :ref:`quick_start/example problem`. To use the user-interface run **./hands-on.py** in a terminal in the Trilinos build directory's **packages/muelu/test/tutorial** folder. From this point forward, we will provide all paths relative to that folder in the build directory.
-First one has to choose a problem. For this tutorial, select option 0 for the Laplace 2D problem on a :math:`50 \times 50` mesh.
+First, one has to choose a problem. For this tutorial, select option 0 for the Laplace 2D problem on a :math:`50 \times 50` mesh.
 
 .. literalinclude:: output/quick_start_1.txt
 
-Next one has to choose a xml file with the multigrid parameters. Choose option 2 and put in **s1_easy.xml** as filename for the xml file containing the xml parameters that are used for the multigrid method.
+Next, one has to choose a xml file with the multigrid parameters. Choose option 2 and put in **s1_easy.xml** as filename for the xml file containing the xml parameters that are used for the multigrid method.
 
 .. note::
 
@@ -48,8 +48,9 @@ Next, choose option 0 and run the example. That is, the linear system is created
 
 .. literalinclude:: output/quick_start_3.txt
 
-Note that the line **mpirun -np 2 MueLu_TutorialDriver.exe --matrixType=Laplace2D -nx ...** is the command that is executed in the background. The default is 2 processors used.
-After pressing a key we are ready for a first analysis as it is stated by the green letters **Results up to date!**
+Note that the line **mpirun -np 2 MueLu_TutorialDriver.exe --matrixType=Laplace2D --nx=50 --ny=50 --xml=s1_easy.xml** is the command that is executed in the background. 
+When copying the command, make sure that you have two plain ASCII hyphens in front of each option. In addition, 2 processors are used.
+After pressing a key we are ready for a first analysis as it is stated by the green letters "**Results up to date!**"
 
 .. literalinclude:: output/quick_start_4.txt
 
@@ -57,29 +58,25 @@ After pressing a key we are ready for a first analysis as it is stated by the gr
 
   If the results are not up to date always choose option 0 first to recalculate the results.
 
-To check the output select option 1. This should produce the following output on screen.
+Select option 1 to check the output. This should produce the following output on screen.
 
-.. program-output:: mpiexec -n 2 ../../../test/tutorial/MueLu_TutorialDriver.exe --matrixType=Laplace2D --nx=50 --ny=50 --mgridSweeps=1 --xml=../../../test/tutorial/s1_easy.xml
+.. literalinclude:: output/quick_start_5.txt
 
 .. note::
 
   Depending on the number of lines in your terminal you may have to scroll up to the top of the file
 
-These lines give you some information about the setup process with some details on the aggregation process and the transfer operators. Note that for this example three levels are built: Level 0 for the finest level, level 1 as intermediate level and level 2 for the coarsest level. Then an overview of the different multigrid levels is given by
+These lines give you some information about the setup process with some details on the aggregation process and the transfer operators. Note that for this example three levels are built: Level 0 for the finest level, level 1 as intermediate level and level 2 for the coarsest level. The overview of the different multigrid levels is given by the part
 
-.. warning::
+.. literalinclude:: output/quick_start_6.txt
 
-  Insert screen output
+One can see that a three level multigrid method is used with a direct solver on the coarsest level and Jacobi level smoothers on the fine and intermediate level. Furthermore, some basic information is printed such as the operator complexity.
 
-One can see that a three level multigrid method is used with a direct solver on the coarsest level and Jacobi level smoothers on the fine and intermediate level. Furthermore some basic information is printed such as the operator complexity.
+In the end, the CG convergence is printed when applying the generated multigrid method as preconditioner within a CG solver. The numbers give the relative residual after the corresponding number of iterations as well as the solution time in seconds.
 
-In the end the CG convergence is printed when applying the generated multigrid method as preconditioner within a CG solver. The numbers give the relative residual after the corresponding number of iterations as well as the solution time in seconds.
+.. literalinclude:: output/quick_start_7.txt
 
-.. warning::
-
-  Insert screen output
-
-Selecting option 6 gives you four plots.
+Selecting option 6 in the menu gives you four plots.
 
 .. image:: pics/tut1_6.png
   :width: 10cm
@@ -90,7 +87,7 @@ The lower left plot shows the exact solution of the linear system (using a direc
 
   The plots do not show the solution of the preconditioned CG method! The solution of the CG method is always exact up to a given tolerance as long as the multigrid preconditioner is sufficient. This can be checked by the screen output under option 1.
 
-As a first experiment we change the number of multigrid sweeps for the stand alone multigrid smoother. Let's choose option 5 and use 10 multigrid sweeps.
+As a first experiment, we change the number of multigrid sweeps for the stand alone multigrid smoother. Let's choose option 5 and use 10 multigrid sweeps.
 
 .. image:: pics/tut1_7.png
   :width: 10cm
@@ -100,22 +97,20 @@ Then, do not forget to rerun the examples to update the results. That is, choose
 .. image:: pics/tut1_8.png
   :width: 10cm
 
-As one can see is the multigrid solution rather close to the exact solution. In the error plot one finds some low and high frequency error components.
+As one can see, the multigrid solution is rather close to the exact solution. In the error plot one finds some low and high frequency error components.
 
-.. admonition: Exercise 1
+.. admonition: Exercise
 
   Change the number of processors. Use option 4 and select for example 4 processors (instead of 2). Rerun the example and plot the results.
 
   .. image:: pics/tut1_9.png
     :width: 10cm
 
-.. admonition: Exercise 2
+.. admonition: Exercise
 
   Compare the output when using 4 processors with the output for only 2 processors. Is the number of aggregates changing? Is there some effect on the quality of the multigrid solution? How does the number and convergence history change for the preconditioned CH method?
 
-.. admonition: Exercise 3
-
-  Choose option 8 to close the program
+Once this is done, choose option 8 to close the program.
 
 The XML input deck - multigrid parameters
 -----------------------------------------
@@ -127,7 +122,7 @@ Then, we run the driver program again using
 
 **./hands-on.sh**
 
-and choose option 0 for the 2D-Laplace example on the **50\times50** mesh. Use the xml parameters from the **mysolver.xml**`file, that is, choose option 2 and put in **mysolver.xml**. Make sure that the problem can be solved with the parameters (option 0) and verify the solver output.
+and choose option 0 for the 2D-Laplace example on the :math:`50 \times 50` mesh. Use the xml parameters from the **mysolver.xml** file, that is, choose option 2 and put in **mysolver.xml**. Make sure that the problem can be solved with the parameters (option 0) and verify the solver output.
 Once that is done it is time for some first experiments. Open your **mysolver.xml** file in a text editor. You can try option 3 for doing that, but alternatively you can also do it by hand choosing your favorite text editor.
 
 .. image:: pics/tut1_10.png
@@ -135,43 +130,37 @@ Once that is done it is time for some first experiments. Open your **mysolver.xm
 
 Now, let's change the maximum number of multigrid levels from 3 to 10 in the xml file, that is, change the value of the parameter **max levels** from 3 to 10. Do not forget to save the file and rerun the example by choosing option 0 in the driver program. The screen output should be the following
 
-.. warning::
-
-  Insert missing output
+.. literalinclude:: output/quick_start_8.txt
 
 .. note::
 
-  Even though we allow for at maximum 10 multigrid levels the coarsening process stops after level 4. The reason is that the linear operator on multigrid level 4 has only 4 lines and therefore is smaller than the coarse: max size parameter in the xml parameter list which defines the maximum size of the linear operator on the coarsest level.
+  Even though we allow for at maximum 10 multigrid levels the coarsening process stops after level 4. The reason is that the linear operator on multigrid level 4 has only 8 lines and therefore is smaller than the coarse: max size parameter in the xml parameter list which defines the maximum size of the linear operator on the coarsest level.
 
-.. admonition: Exercise 4
+.. admonition:: Exercise
 
   How do you have to choose the coarse: max size parameter to obtain a 3 level multigrid method again? Increase the parameter accordingly, rerun the simulation and check your results.
 
-.. admonition: Exercise 5
+.. admonition:: Exercise
 
   What happens if you allow only for a 1 level method (i.e., no multigrid)? How does this affect the preconditioned CG method?
 
 The option sa for **smoothed aggregation** in the multigrid algorithm parameter can be considered to be optimal for symmetric positive definite (SPD) problems. We can compare it with the option unsmoothed as a robust but slower alternative. Let’s choose a 3 level multigrid method with unsmoothed transfer operators (i.e., max levels = 3, multigrid algorithm = unsmoothed), then we obtain
 
-.. warning::
-
-  Insert missing output
+.. literalinclude:: output/quick_start_9.txt
 
 Compared with the smoothed aggregation method (multigrid algorithm = sa) which uses some smoothed transfer operator basis functions within the multigrid method, the unsmoothed multigrid algorithm needs a significantly higher number of iterations. The same method with smoothed transfer operator basis functions gives
 
-.. warning::
-
-  Insert missing output
+.. literalinclude:: output/quick_start_10.txt
 
 .. note::
 
-  You can find the corresponding xml files also in **../../../test/tutorial/s1_easy_3levels_smoothed.xml**
+  You can find the corresponding xml file for smoothed aggregation with 3 levels also in **s1_easy_3levels_smoothed.xml**
 
-.. admonition: Exercise 6
+.. admonition: Exercise
 
   Compare the screen output of the unsmoothed multigrid method and the smoothed aggregation multigrid method. Which parts are missing in the multigrid setup for the unsmoothed multigrid method? How does the multigrid method affect the aggregates?
 
-.. admonition: Exercise 7
+.. admonition: Exercise
 
   Performing 10 multigrid sweeps both with the unsmoothed and the smoothed aggregation multigrid method gives the following error plots
 

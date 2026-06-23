@@ -1,0 +1,25 @@
+--------------------------------------------------------------------------------
+---                            Multigrid Summary                             ---
+--------------------------------------------------------------------------------
+Scalar              = double
+Number of levels    = 4
+Operator complexity = 1.37
+Smoother complexity = 1.62
+Cycle type          = V
+
+level  rows    nnz  nnz/row  c ratio  procs
+  0    2500  12300     4.92               2
+  1     442   3976     9.00     5.66      2
+  2      52    570    10.96     8.50      2
+  3       8     62     7.75     6.50      2
+
+Smoother (level 0) both : "Ifpack2::Relaxation": {Initialized: true, Computed: true, Type: Jacobi, sweeps: 1, damping factor: 0.9, Global matrix dimensions: [2500, 2500], Global nnz: 12300}
+
+Smoother (level 1) both : "Ifpack2::Relaxation": {Initialized: true, Computed: true, Type: Jacobi, sweeps: 1, damping factor: 0.9, Global matrix dimensions: [442, 442], Global nnz: 3976}
+
+Smoother (level 2) both : "Ifpack2::Relaxation": {Initialized: true, Computed: true, Type: Jacobi, sweeps: 1, damping factor: 0.9, Global matrix dimensions: [52, 52], Global nnz: 570}
+
+Smoother (level 3) pre  : KLU2 solver interface
+Smoother (level 3) post : no smoother
+
+=====================================================================================================================
