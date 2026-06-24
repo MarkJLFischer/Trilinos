@@ -268,6 +268,9 @@ int main(int argc, char* argv[]) {
       // Register nullspace as user data in the MueLu parameter list
       ParameterList& userDataList = mueluParams->sublist("user data");
       userDataList.set<RCP<MultiVector>>("Nullspace", nullspace);
+      userDataList.set<RCP<RealValuedMultiVector>>(
+          "Coordinates",
+          Teuchos::rcp_const_cast<RealValuedMultiVector>(coordinates));
       //! [InsertNullspaceInUserData end]
 
       //! [CreateTpetraPreconditioner begin]

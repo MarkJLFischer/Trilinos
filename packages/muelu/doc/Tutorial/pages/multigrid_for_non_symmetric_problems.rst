@@ -12,10 +12,10 @@ The **Recirc2D** example uses a matrix corresponding to the finite-difference di
 .. math::
     -\varepsilon\Delta u + (v_x,v_y)\cdot \nabla u=f
 
-on the unit square, with :math:`\varepsilon=1e-5` and homogeneous Dirichlet boundary conditions.
+on the unit square, with :math:`\varepsilon=1\cdot 10^{-5}` and homogeneous Dirichlet boundary conditions.
 It is :math:`v_x=4x(x-1)(1-2y)` and :math:`v_y=-4y(y-1)(1-2x)`.
-The right hand side vector :math:`f` is chosen to be the constant vector 1.
-Due to the convective term the resulting linear system is non-symmetric and therefore more challenging for the iterative solver.
+The right hand side :math:`f` is chosen to be constant 1.
+Due to the convective term, the resulting linear system is non-symmetric and therefore more challenging for the iterative solver.
 The multigrid algorithm has to be adapted to the non-symmetry to obtain good convergence behavior.
 
 User interface
@@ -23,18 +23,16 @@ User interface
 
 For this tutorial again we can use the easy-to-use user interface.
 Run the **hands-on.py** script in your terminal and choose option 2 for the **Recirc 2D** example on a :math:`50\times 50` mesh.
-Note that the default values from the file **../../../test/tutorial/s2a.xml** do not lead to a convergent multigrid preconditioner.
+Note that when running the simulation with **n1_easy.xml** as solver, we do not get a convergent multigrid preconditioner.
 
-.. figure:: pics/tut1_13.png
-    :align: center
-    :width: 10cm
+.. literalinclude:: output/non_symmetric1.txt
 
 The convergence of the used unsmoothed transfer operators (**multigrid algorithm = unsmoothed**) is not optimal.
-In case of symmetric problems one can reduce the number of iterations using smoothed aggregation algebraic multigrid methods.
+In case of symmetric problems, one can reduce the number of iterations using smoothed aggregation algebraic multigrid methods.
 In context of non-symmetric problems, especially when arising from problems with (highly) convective phenomena,
 one should use a Petrov-Galerkin approach for smoothing the prolongation and restriction operators more carefully.
 
-In MueLu one can choose a Petrov-Galerkin approach for the transfer operators by setting **multigrid algorithm = pg**.
+In MueLu one can choose a Petrov-Galerkin approach for the transfer operators by setting in the xml file **multigrid algorithm = pg**.
 Furthermore, one has to state that the system is non-symmetric by setting **problem: symmetric = false**.
 In addition, you have to set **transpose: use implicit = false** to make sure that the prolongation and restriction are built separately.
 This is highly important for non-symmetric problems since :math:`R=P^T` is not a good choice for non-symmetric problems (see, e.g., [1]_ [2]_).
@@ -43,13 +41,10 @@ The role of the **transpose: use implicit** and the **problem: symmetric** param
 
 .. admonition:: Description
 
-    * **transpose: use implicit** Use :math:`R=P^T` for the restriction operator and do not explicitly build the operator :math:`R`.
-    This can save a lot of memory and might be very performant when building the multigrid Galerkin product.
-    However, for non-symmetric problems this is not working and has to be turned off.
-    * **problem: symmetric** If **true**, use :math:`R=P^T` as restriction operator.
-    Depending on the **transpose: use implicit** parameter the restriction operator is explicitly built.
-    If **false** a Petrov-Galerkin approach as described in [1]_ is used to build the restriction operator separately.
-    Note, that for the Galerkin approach it is necessary to build the restriction operator explicitly and store it.
+    * **"transpose: use implicit":** Use :math:`R=P^T` for the restriction operator and do not explicitly build the operator :math:`R`. This can save a lot of memory and might be very performant when building the multigrid Galerkin product. However, for non-symmetric problems this is not working and has to be turned off.
+
+
+    * **"problem: symmetric":** If **true**, use :math:`R=P^T` as restriction operator. Depending on the **transpose: use implicit** parameter the restriction operator is explicitly built. If **false** a Petrov-Galerkin approach as described in [1]_ is used to build the restriction operator separately. Note, that for the Galerkin approach it is necessary to build the restriction operator explicitly and store it.
 
 
 .. note::

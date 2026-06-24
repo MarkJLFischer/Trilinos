@@ -48,8 +48,9 @@ Next, choose option 0 and run the example. That is, the linear system is created
 
 .. literalinclude:: output/quick_start_3.txt
 
-Note that the line **mpirun -np 2 MueLu_TutorialDriver.exe --matrixType=Laplace2D --nx=50 --ny=50 --xml=s1_easy.xml** is the command that is executed in the background. 
-When copying the command, make sure that you have two plain ASCII hyphens in front of each option. In addition, 2 processors are used.
+Note that the line **mpirun -np 2 MueLu_TutorialDriver.exe --matrixType=Laplace2D --nx=50 --ny=50 --xml=s1_easy.xml** is the command that is executed in the background, which you can always run as an alternative to the user interface.
+When copying the command, make sure that you have two plain ASCII hyphens in front of each option like the matrixType, the nodes in each dimension or the xml file. In addition, 2 processors are used as defined in the beginning of the command.
+
 After pressing a key we are ready for a first analysis as it is stated by the green letters "**Results up to date!**"
 
 .. literalinclude:: output/quick_start_4.txt
@@ -58,15 +59,7 @@ After pressing a key we are ready for a first analysis as it is stated by the gr
 
   If the results are not up to date always choose option 0 first to recalculate the results.
 
-Select option 1 to check the output. This should produce the following output on screen.
-
-.. literalinclude:: output/quick_start_5.txt
-
-.. note::
-
-  Depending on the number of lines in your terminal you may have to scroll up to the top of the file
-
-These lines give you some information about the setup process with some details on the aggregation process and the transfer operators. Note that for this example three levels are built: Level 0 for the finest level, level 1 as intermediate level and level 2 for the coarsest level. The overview of the different multigrid levels is given by the part
+Select option 1 to check the output. These lines give you some information about the setup process with some details on the aggregation process and the transfer operators. Note that for this example three levels are built: Level 0 for the finest level, level 1 as intermediate level and level 2 for the coarsest level. The overview of the different multigrid levels is given by the part
 
 .. literalinclude:: output/quick_start_6.txt
 
@@ -76,7 +69,7 @@ In the end, the CG convergence is printed when applying the generated multigrid 
 
 .. literalinclude:: output/quick_start_7.txt
 
-Selecting option 6 in the menu gives you four plots.
+If you wish to have a more/less detailed output, you can adjust the "verbosity" level in the XML file. Selecting option 6 in the menu gives you four plots.
 
 .. image:: pics/tut1_6.png
   :width: 10cm

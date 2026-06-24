@@ -17,9 +17,9 @@ MueLu allows one to export plain aggregation information in simple text files th
 Visualization of aggregates with MueLu using VTK
 ------------------------------------------------
 
-We can visualize the aggregates using the vtk file format and a visualization program called ParaView. First add the parameter **aggregation: export visualization data = true** to the list of aggregation parameters. Use, e.g., the following xml file **../../../test/tutorial/n2_easy_agg.xml**.
+We can visualize the aggregates using the vtk file format and a visualization program called ParaView. First add the parameter **aggregation: export visualization data = true** to the list of aggregation parameters. Use, e.g., the **n2_easy_agg.xml** file.
 
-Run the **hands-on.py** script and select, e.g., the Laplace 2D example on a :math:`50\times 50` mesh. Select above xml file for the multigrid parameters with the **aggregation: export visualization data** enabled. Run the program and then choose option 8 for post-processing the aggregates.
+Run the **hands-on.py** script and select, e.g., the Laplace 2D example on a :math:`50\times 50` mesh. Select the above xml file for the multigrid parameters with the **aggregation: export visualization data** enabled. Run the program and then choose option 8 for post-processing the aggregates.
 
 .. image:: pics/tut1_14.png
     :width: 10cm
@@ -48,19 +48,19 @@ Figure :ref:`useful_tools_for_analysis/figure_aggsSymm` shows the aggregates for
 .. _useful_tools_for_analysis/figure_aggsSymm:
 
 .. figure:: pics/aggsSymm.png
-    :width: 0.7
+    :width: 20cm
 
     Aggregates for Laplace2D example on :math:`50\times 50` mesh without dropping.
 
 
 .. admonition:: Exercise 1
 
-    Repeat above steps for the *Recirc2D* example on a :Math:`50\times 50` mesh. Compare the aggregates from the **../../../test/tutorial/n2_easy_agg.xml** parameter file with the aggregates when using the **../../../test/tutorial/n2_easy_agg2.xml** parameter file, which drops some small entries of the fine level matrix :math:`A` when building the graph.
+    Repeat above steps for the *Recirc2D* example on a :Math:`50\times 50` mesh. Compare the aggregates from the **n2_easy_agg.xml** parameter file with the aggregates when using the **n2_easy_agg2.xml** parameter file, which drops some small entries of the fine level matrix :math:`A` when building the graph.
 
 .. admonition:: Exercise 2
 
     Vary the number of processors. Do not forget to export the aggregation data (option 7) after the simulation has rerun with a new number of processors. In *ParaView* choose the variable *proc* for the coloring. Then the color denotes the processor the aggregate belongs to. How do the aggregates change when switching from 2 to 3 processors?
-    *  Try the solver parameters from **../../../test/tutorial/s4c.xml** or the *Recirc2D* example on a :math:`50\times 50` mesh and compare them with the results for the **../../../test/tutorial/s4a.xml** and **../../../test/tutorial/s4b.xml** parameters. Which differences do you observe?
+    *  Try the solver parameters from **n2_easy_solver.xml** or the *Recirc2D* example on a :math:`50\times 50` mesh and compare them with the results for the **n2_easy_solver.xml** and **n2_easy_solver.xml** parameters. Which differences do you observe?
 
 
 Figure :ref:`useful_tools_for_analysis/figure_aggsNonSymm` shows the aggregates for the Recirc2D problem. When building the matrix graph, entries with values smaller than :math:`0.01` were dropped. Obviously the shape of the aggregates follows the direction of convection of the example. Using an uncoupled aggregation method (i.e., **aggregation: type = uncoupled**) as default the aggregates do not cross processor boundaries.
@@ -69,7 +69,7 @@ Figure :ref:`useful_tools_for_analysis/figure_aggsNonSymm` shows the aggregates 
 .. _useful_tools_for_analysis/figure_aggsNonSymm:
 
 .. figure:: pics/aggsNonSymm.png
-    :width: 0.7
+    :width: 20cm
 
     Aggregates for Recirc2D example on :math:`50\times 50` mesh with dropping.
 
@@ -90,4 +90,4 @@ The following xml file writes the fine level operator and the coarse level opera
 
     Be aware that there is no prolongator and restrictor on the finest level (level 0) since the transfer operators between level :math:`\ell` and :math:`\ell+1` are always associated with the coarse level :math:`\ell +1` (for technical reasons). So, be not confused if there is no **P_0.m** and **R_0.m**. Only the operators are written to external files which really exist and are requested in the corresponding list in the xml parameters.
 
-The exported files can easily imported into MATLAB and used for some in-depth analysis (determining the eigenvalue spectrum, sparsity pattern,...).
+The exported files can be easily imported into MATLAB and used for some in-depth analysis (determining the eigenvalue spectrum, sparsity pattern,...).

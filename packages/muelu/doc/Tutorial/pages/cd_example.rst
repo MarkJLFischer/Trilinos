@@ -12,7 +12,7 @@ Here, we consider a convection-diffusion example with :math:`16641` degrees of f
 User-interface
 ==============
 
-Run the *hands-on.sh* script and choose the option 4 for the convection-diffusion example. The script automatically generates a XML file with reference multigrid parameters which are far from being optimal.
+Run the **hands-on.py** script and choose the option 4 for the convection-diffusion example. The script automatically generates a XML file with reference multigrid parameters which are far from being optimal.
 
 .. image:: pics/tut1_16.png
     :width: 10cm
@@ -25,7 +25,7 @@ When using the reference settings for the multigrid preconditioner we need 85 li
 
 .. admonition:: Exercise 1
 
-    Open the *Recirc2D_parameters.xml* file by pressing option 3. Try to find optimized multigrid settings using your knowledge from the previous tutorials. Save the file and rerun the example (using option 0). Compare your results with the reference results. With option 6 you can plot the convergence of the relative residual of the iterative solver (for comparison).
+    Open the **Recirc2D_parameters.xml** file by pressing option 3. Try to find optimized multigrid settings using your knowledge from the previous tutorials. Save the file and rerun the example (using option 0). Compare your results with the reference results. With option 6 you can plot the convergence of the relative residual of the iterative solver (for comparison).
 
 .. _cd_example/generalhints:
 
@@ -52,10 +52,10 @@ Then, one should think about the transfer operators. In the symmetric case one c
 Level smoothers
 ---------------
 
-Once the multigrid skeleton is fixed by the choice of transfer operators one can start with optimizing the level smoothers. When using relaxation based level smoothers one should first try different smoothing parameters and increase the number of smoothing sweeps only when necessary.
+Once the multigrid skeleton is fixed by the choice of transfer operators, one can start with optimizing the level smoothers. When using relaxation based level smoothers, one should first try different smoothing parameters and increase the number of smoothing sweeps only when necessary.
 
 Fine tuning
 -----------
 
 Sometimes it is very helpful to have a look at the multigrid matrices.
-First of all, one should check whether the aggregation is working properly. This can be done by checking the screen output for the coarsening rate and the aggregation details (this is often the only way to do it if aggregates cannot be visualized due to missing node coordinates). If there is some problem with the aggregation one should try to adapt the aggregation parameters. Here it might make sense to export the coarse level matrices first and study their properties. For finding aggregation parameters one should, e.g., check the number of non-zeros in each row and choose the minimum aggregation size accordingly.
+First of all, one should check whether the aggregation is working properly. This can be done by checking the screen output for the coarsening rate and the aggregation details (this is often the only way to do it if aggregates cannot be visualized due to missing node coordinates). If there is some problem with the aggregation, one should try to adapt the aggregation parameters. Here it might make sense to export the coarse level matrices first and study their properties. For finding aggregation parameters one should, e.g., check the number of non-zeros in each row and choose the minimum aggregation size accordingly.

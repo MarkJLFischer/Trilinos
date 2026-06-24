@@ -14,7 +14,7 @@
     <Parameter name="relaxation: damping factor" type="double" value="0.9"/>
   </ParameterList>
 
-  <!-- Jacobi -->
+  <!-- Coarse Solver -->
   <Parameter name="coarse: type" type="string" value="DirectSolver"/>
   
 </ParameterList>

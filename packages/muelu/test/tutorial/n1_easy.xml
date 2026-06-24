@@ -1,13 +1,13 @@
 <ParameterList name="MueLu">
 
-  <Parameter name="verbosity" type="string" value="high"/>
+  <Parameter name="verbosity" type="string" value="low"/>
 
   <Parameter name="max levels" type="int" value="3"/>
   <Parameter name="coarse: max size" type="int" value="10"/>
 
   <Parameter name="multigrid algorithm" type="string" value="unsmoothed"/>
   <Parameter name="problem: symmetric" type="bool" value="true"/>
-  <Parameter name="transpose: use implicit" type="bool" value="false"/>
+  <Parameter name="transpose: use implicit" type="bool" value="true"/>
 
   <Parameter name="smoother: type" type="string" value="RELAXATION"/>
   <ParameterList name="smoother: params">
