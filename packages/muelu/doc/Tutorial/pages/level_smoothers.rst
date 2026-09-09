@@ -156,7 +156,7 @@ A detailed overview of the different available smoothers can be found in the Mue
         :caption:
 
   That is, we change to smoothed aggregation AMG (SA-AMG).
-  You can find the xml file under the name **.s1_easy_exercise.xml**.
+  You can find the xml file under the name **s1_easy_exercise.xml**.
   Run the example on two processors and check the number of linear iterations and the solver timings in the screen output.
   Can you find smoother parameters which reduce the number of iterations?
   Can you find smoother parameters which reduce the iteration timings?
