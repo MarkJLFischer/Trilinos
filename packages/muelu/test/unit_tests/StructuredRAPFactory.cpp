@@ -205,7 +205,8 @@ template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, GlobalOrdinal, Node> >
 buildCoarseMatrix(const StructuredProblemData<Scalar, LocalOrdinal, GlobalOrdinal, Node>& problem,
                   const StructuredTransferData<Scalar, LocalOrdinal, GlobalOrdinal, Node>& transferData,
-                  const bool prebuildCoarseGraph) {
+                  const bool prebuildCoarseGraph,
+                  const std::string& tripleProductImplementation = "xpetra") {
   using SC     = Scalar;
   using LO     = LocalOrdinal;
   using GO     = GlobalOrdinal;
@@ -223,6 +224,7 @@ buildCoarseMatrix(const StructuredProblemData<Scalar, LocalOrdinal, GlobalOrdina
   Teuchos::ParameterList rapParams = *rap.GetValidParameterList();
   rapParams.set("rap: triple product", true);
   rapParams.set("rap: prebuild coarse graph", prebuildCoarseGraph);
+  rapParams.set("rap: triple product implementation", tripleProductImplementation);
   rapParams.set("transpose: use implicit", true);
   rapParams.set("rap: matrix type", problem.matrixType);
   rap.SetParameterList(rapParams);
@@ -413,7 +415,7 @@ void runStructuredRAPComparison(const std::string& matrixType,
       buildStructuredTransferData<SC, LO, GO, NO>(problem, interpolationOrder, coarseningRate);
 
   Teuchos::RCP<Xpetra::Matrix<SC, LO, GO, NO> > structuredAc =
-      buildCoarseMatrix<SC, LO, GO, NO>(problem, transferData, true);
+      buildCoarseMatrix<SC, LO, GO, NO>(problem, transferData, true, "structured");
   Teuchos::RCP<Xpetra::Matrix<SC, LO, GO, NO> > referenceAc =
       buildCoarseMatrix<SC, LO, GO, NO>(problem, transferData, false);
 

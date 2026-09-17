@@ -74,6 +74,7 @@
       <Parameter name="structuredInterpolationOrder"        type="string" value="myAggregationFact"/>
       <Parameter name="rap: triple product"                 type="bool"   value="true"/>
       <Parameter name="rap: prebuild coarse graph"          type="bool"   value="true"/>
+      <Parameter name="rap: triple product implementation"  type="string" value="xpetra"/>
       <Parameter name="transpose: use implicit"             type="bool"   value="true"/>
       <ParameterList name="TransferFactories">
         <Parameter name="CoordinateTransfer"                type="string" value="myCoordTransferFact"/>
