@@ -24,6 +24,7 @@
 #include <Xpetra_MapFactory.hpp>
 
 #include "MueLu_StructuredRAPFactory_decl.hpp"
+#include "MueLu_StructuredRAPKernel.hpp"
 
 #include "MueLu_MasterList.hpp"
 #include "MueLu_NoFactory.hpp"
@@ -116,6 +117,12 @@ StructuredRAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::StructuredRAPFa
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 RCP<const ParameterList> StructuredRAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::GetValidParameterList() const {
   RCP<ParameterList> validParamList = rcp(new ParameterList());
+  validParamList->set<std::string>(
+      "rap: matrix type", "", "Galeri matrix type used to infer the structured RAP graph.");
+  validParamList->set<std::string>(
+      "rap: triple product implementation", "xpetra",
+      "Implementation used with a prebuilt coarse graph: xpetra or structured.");
+
 #define SET_VALID_ENTRY(name) validParamList->setEntry(name, MasterList::getEntry(name))
   SET_VALID_ENTRY("rap: triple product");         // in the long term this has to be the only option for multiplication
   SET_VALID_ENTRY("rap: prebuild coarse graph");  // if true, the coarse graph is prebuilt and passed to the triple matrix product kernel. This can be used to optimize the symbolic phase of the triple matrix product.
@@ -1179,12 +1186,32 @@ void StructuredRAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Leve
           Ac = MatrixFactory::Build(P->getDomainMap(), Teuchos::as<LocalOrdinal>(0));
       }
 
-      SubFactoryMonitor m2(*this, "MxMxM: P^T x A x P (implicit)", coarseLevel);
+      // We *always* need global constants for the RAP, but not for the temps
+      RAPparams->set("compute global constants: temporaries", RAPparams->get("compute global constants: temporaries", false));
+      RAPparams->set("compute global constants", true);
 
-      Xpetra::TripleMatrixMultiply<SC, LO, GO, NO>::
-          MultiplyRAP(*P, doTranspose, *A, !doTranspose, *P, !doTranspose, *Ac, doFillComplete,
-                      doOptimizeStorage, labelstr + std::string("MueLu::P^T*A*P-implicit-") + levelstr.str(),
-                      RAPparams);
+      if (Ac.is_null())
+        Ac = MatrixFactory::Build(P->getDomainMap(), Teuchos::as<LocalOrdinal>(0));
+
+      const std::string tripleProductImplementation =
+          pL.get<std::string>("rap: triple product implementation");
+      TEUCHOS_TEST_FOR_EXCEPTION(
+          tripleProductImplementation != "xpetra" && tripleProductImplementation != "structured",
+          Exceptions::RuntimeError,
+          "StructuredRAPFactory: unknown value \"" << tripleProductImplementation
+                                                     << "\" for \"rap: triple product implementation\". "
+                                                        "Valid values are \"xpetra\" and \"structured\".");
+
+      if (tripleProductImplementation == "xpetra") {
+        SubFactoryMonitor m2(*this, "MxMxM: Xpetra P^T x A x P (implicit)", coarseLevel);
+        Xpetra::TripleMatrixMultiply<SC, LO, GO, NO>::
+            MultiplyRAP(*P, doTranspose, *A, !doTranspose, *P, !doTranspose, *Ac, doFillComplete,
+                        doOptimizeStorage, labelstr + std::string("MueLu::Xpetra-P^T*A*P-implicit-") + levelstr.str(),
+                        RAPparams);
+      } else {
+        SubFactoryMonitor m2(*this, "MxMxM: Structured P^T x A x P (implicit)", coarseLevel);
+        Details::StructuredRAPKernel<SC, LO, GO, NO>::Compute(*A, *P, *Ac, RAPparams);
+      }
 
       {
         GetOStream(Statistics1) << "StructuredRAP: Ac nnz (prebuild coarse graph = "
