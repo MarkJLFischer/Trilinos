@@ -113,6 +113,7 @@ SolverBase
 SteepestDescentSolver
 StratimikosSmoother - #if defined(HAVE_MUELU_STRATIMIKOS) && defined(HAVE_MUELU_THYRA)
 StructuredAggregationFactory
+StructuredRAPFactory - #ifdef HAVE_MUELU_EXPERIMENTAL
 StructuredLineDetectionFactory
 SubBlockAFactory
 TekoSmoother - #ifdef HAVE_MUELU_TEKO

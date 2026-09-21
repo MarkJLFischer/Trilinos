@@ -89,38 +89,32 @@ IF(${PACKAGE_NAME}_ENABLE_Belos AND ${PACKAGE_NAME}_ENABLE_Amesos2)
     NUM_MPI_PROCS 4
   )
 
-  IF(${PACKAGE_NAME}_ENABLE_Epetra)
-    MUELU_ADD_SERIAL_AND_MPI_TEST(
-      Structured
-      NAME "Structured_Laplace2D_Epetra"
-      ARGS "--linAlgebra=Epetra --xml=structured_1dof.xml --matrixType=Laplace2D"
-      COMM serial mpi
-      NUM_MPI_PROCS 4
-    )
+  IF(MueLu_ENABLE_Experimental)
 
     MUELU_ADD_SERIAL_AND_MPI_TEST(
       Structured
-      NAME "Structured_Laplace2D_Shift_Epetra"
-      ARGS "--linAlgebra=Epetra --xml=structured_1dof_shift.xml --matrixType=Laplace2D"
-      COMM serial mpi
+      NAME "StructuredRAPFactory"
+      POSTFIX_AND_ARGS_0 "Constant_Laplace1D" --linAlgebra=Tpetra --xml=structured_rapfactory_laplace_const.xml --matrixType=Laplace1D --nx=20 --op=setup
+      POSTFIX_AND_ARGS_1 "Constant_Laplace2D" --linAlgebra=Tpetra --xml=structured_rapfactory_laplace_const.xml --matrixType=Laplace2D --nx=10 --ny=10 --op=setup
+      POSTFIX_AND_ARGS_2 "Linear_Laplace2D" --linAlgebra=Tpetra --xml=structured_rapfactory_laplace_lin.xml --matrixType=Laplace2D --nx=10 --ny=10 --op=setup
+      POSTFIX_AND_ARGS_3 "Constant_Laplace3D" --linAlgebra=Tpetra --xml=structured_rapfactory_laplace_const.xml --matrixType=Laplace3D --nx=10 --ny=10 --nz=20 --op=setup
+      POSTFIX_AND_ARGS_4 "Linear_Laplace3D" --linAlgebra=Tpetra --xml=structured_rapfactory_laplace_lin.xml --matrixType=Laplace3D --nx=10 --ny=10 --nz=20 --op=setup
+      POSTFIX_AND_ARGS_5 "Constant_Elasticity2D" --linAlgebra=Tpetra --xml=structured_rapfactory_elasticity2d_const.xml --matrixType=Elasticity2D --nx=20 --ny=20 --op=setup
+      POSTFIX_AND_ARGS_6 "Constant_Elasticity3D" --linAlgebra=Tpetra --xml=structured_rapfactory_elasticity3d_const.xml --matrixType=Elasticity3D --nx=20 --ny=20 --nz=10 --op=setup
+      POSTFIX_AND_ARGS_7 "Linear_Elasticity3D" --linAlgebra=Tpetra --xml=structured_rapfactory_elasticity3d_lin.xml --matrixType=Elasticity3D --nx=16 --ny=16 --nz=16 --op=setup
       NUM_MPI_PROCS 4
     )
 
-    MUELU_ADD_SERIAL_AND_MPI_TEST(
-      Structured
-      NAME "Structured_Elasticity3D_Epetra"
-      ARGS "--linAlgebra=Epetra --xml=structured_3dof.xml --matrixType=Elasticity3D --nx=25 --ny=25 --nz=25"
-      COMM serial mpi
-      NUM_MPI_PROCS 4
+    TRIBITS_COPY_FILES_TO_BINARY_DIR(
+      StructuredRAPFactory_cp
+      SOURCE_FILES
+        structured_rapfactory_elasticity2d_const.xml
+        structured_rapfactory_elasticity3d_const.xml
+        structured_rapfactory_elasticity3d_lin.xml
+        structured_rapfactory_laplace_const.xml
+        structured_rapfactory_laplace_lin.xml
     )
 
-    MUELU_ADD_SERIAL_AND_MPI_TEST(
-      Structured
-      NAME "Structured_Line_Epetra"
-      ARGS "--linAlgebra=Epetra --xml=structured_interp_line.xml --matrixType=Laplace3D --nx=25 --ny=25 --nz=25"
-      COMM serial mpi
-      NUM_MPI_PROCS 4
-    )
   ENDIF()
 
   TRIBITS_COPY_FILES_TO_BINARY_DIR(

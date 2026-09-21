@@ -245,6 +245,9 @@ IF(${PACKAGE_NAME}_ENABLE_Experimental
    AND ${PACKAGE_NAME}_ENABLE_Ifpack2
    AND ${PACKAGE_NAME}_ENABLE_Amesos2
 )
+IF(${PACKAGE_NAME}_ENABLE_Experimental)
+  APPEND_SET(SOURCES StructuredRAPFactory.cpp)
+
   APPEND_SET(
     SOURCES_REGION
     RegionMatrix.cpp
