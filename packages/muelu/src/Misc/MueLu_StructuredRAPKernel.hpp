@@ -213,43 +213,45 @@ class StructuredRAPKernel {
         const auto localA = A.getLocalMatrixDevice();
         const Elasticity2DStencilAccessor<decltype(localA)> aStencil{localA};
         auto localAc      = Ac.getLocalMatrixDevice();
-        const size_t numFineNodes =
-            static_cast<size_t>(localFineNodes[0]) *
-            static_cast<size_t>(localFineNodes[1]);
         const size_t numCoarseNodes =
             static_cast<size_t>(localCoarseNodes[0]) *
             static_cast<size_t>(localCoarseNodes[1]);
         const size_t numWorkers =
             static_cast<size_t>(executionSpace.concurrency());
 
-        // Build the order-zero interpolation map once. The numeric kernel can
-        // then map every fine-grid stencil neighbor to its coarse-grid owner
-        // with one contiguous lookup instead of repeating coordinate divisions and
-        // boundary logic for every matrix entry.
-        lo_view fineNodeToCoarseNode(
+        // Build cache-resident one-dimensional ownership maps once.
+        lo_view fineXToCoarseX(
             Kokkos::ViewAllocateWithoutInitializing(
-                "StructuredRAP: constant fine-to-coarse map"),
-            numFineNodes);
+                "StructuredRAP: fine-X to coarse-X map"),
+            static_cast<size_t>(localFineNodes[0]));
+        lo_view fineYToCoarseY(
+            Kokkos::ViewAllocateWithoutInitializing(
+                "StructuredRAP: fine-Y to coarse-Y map"),
+            static_cast<size_t>(localFineNodes[1]));
         {
           Teuchos::TimeMonitor timer(
               *Teuchos::TimeMonitor::getNewTimer(
-                  timerPrefix + "build constant interpolation map"));
+                  timerPrefix + "build constant interpolation maps"));
           Kokkos::parallel_for(
-              "StructuredRAP: build constant fine-to-coarse map",
-              range_policy(executionSpace, 0, numFineNodes),
-              KOKKOS_LAMBDA(const size_t fineNodeIndex) {
-                const LO fineNode = static_cast<LO>(fineNodeIndex);
-                const LO fineX    = fineNode % localFineNodes[0];
-                const LO fineY    = fineNode / localFineNodes[0];
-                const LO coarseX  = constantInterpolationCoarse(
+              "StructuredRAP: build fine-X to coarse-X map",
+              range_policy(executionSpace, 0,
+                           static_cast<size_t>(localFineNodes[0])),
+              KOKKOS_LAMBDA(const size_t fineXIndex) {
+                const LO fineX = static_cast<LO>(fineXIndex);
+                fineXToCoarseX(fineXIndex) = constantInterpolationCoarse(
                     fineX, localFineNodes[0], coarseningRate[0]);
-                const LO coarseY  = constantInterpolationCoarse(
+              });
+          Kokkos::parallel_for(
+              "StructuredRAP: build fine-Y to coarse-Y map",
+              range_policy(executionSpace, 0,
+                           static_cast<size_t>(localFineNodes[1])),
+              KOKKOS_LAMBDA(const size_t fineYIndex) {
+                const LO fineY = static_cast<LO>(fineYIndex);
+                fineYToCoarseY(fineYIndex) = constantInterpolationCoarse(
                     fineY, localFineNodes[1], coarseningRate[1]);
-                fineNodeToCoarseNode(fineNodeIndex) =
-                    coarseY * localCoarseNodes[0] + coarseX;
               });
           executionSpace.fence(
-              "StructuredRAP: constant interpolation map complete");
+              "StructuredRAP: constant interpolation maps complete");
         }
 
         {
@@ -355,57 +357,71 @@ class StructuredRAPKernel {
                          ++fineX) {
                       const LO fineNode =
                           fineY * localFineNodes[0] + fineX;
-                      const LO neighborXBegin = fineX == 0 ? LO(0) : fineX - 1;
-                      const LO neighborXEnd =
-                          fineX + 1 < localFineNodes[0] ? fineX + 1 : fineX;
-                      const LO neighborYBegin = fineY == 0 ? LO(0) : fineY - 1;
-                      const LO neighborYEnd =
-                          fineY + 1 < localFineNodes[1] ? fineY + 1 : fineY;
                       const LO firstFineRow = fineNode * LO(2);
                       const size_t aBegin0 = aStencil.rowBegin(firstFineRow);
                       const size_t aBegin1 = aStencil.rowBegin(firstFineRow + LO(1));
-                      size_t nodalStencilEntry = 0;
+                      const bool interior =
+                          fineX > 0 && fineX + 1 < localFineNodes[0] &&
+                          fineY > 0 && fineY + 1 < localFineNodes[1];
 
-                      for (LO neighborY = neighborYBegin;
-                           neighborY <= neighborYEnd; ++neighborY) {
-                        for (LO neighborX = neighborXBegin;
-                             neighborX <= neighborXEnd; ++neighborX) {
-                          const LO columnNode =
-                              neighborY * localFineNodes[0] + neighborX;
-                          const LO targetNode = fineNodeToCoarseNode(
-                              static_cast<size_t>(columnNode));
+                      if (interior) {
+                        size_t nodalStencilEntry = 0;
+                        for (LO neighborY = fineY - 1;
+                             neighborY <= fineY + 1; ++neighborY) {
+                          const LO targetY = fineYToCoarseY(
+                              static_cast<size_t>(neighborY));
+                          for (LO neighborX = fineX - 1;
+                               neighborX <= fineX + 1; ++neighborX) {
+                            const LO targetX = fineXToCoarseX(
+                                static_cast<size_t>(neighborX));
+                            const size_t coarseNodeOffset = static_cast<size_t>(
+                                (targetY - firstStencilY) * stencilWidth +
+                                (targetX - firstStencilX)) * size_t(2);
 
-                          // The sorted full 3x3 coarse stencil gives the exact
-                          // value-array offset. The factory is responsible for
-                          // guaranteeing the canonical A and Ac stencil order.
-                          const LO nodeDelta = targetNode - coarseNode;
-                          LO targetDx        = nodeDelta;
-                          LO targetDy        = 0;
-                          if (nodeDelta < -1) {
-                            targetDy = -1;
-                            targetDx += localCoarseNodes[0];
-                          } else if (nodeDelta > 1) {
-                            targetDy = 1;
-                            targetDx -= localCoarseNodes[0];
+                            for (LO columnDof = 0; columnDof < LO(2);
+                                 ++columnDof) {
+                              const size_t entryOffset =
+                                  coarseNodeOffset + static_cast<size_t>(columnDof);
+                              localAc.values(acBegin0 + entryOffset) +=
+                                  aStencil.value(aBegin0, nodalStencilEntry, columnDof);
+                              localAc.values(acBegin1 + entryOffset) +=
+                                  aStencil.value(aBegin1, nodalStencilEntry, columnDof);
+                            }
+                            ++nodalStencilEntry;
                           }
-                          const LO targetX = coarseX + targetDx;
-                          const LO targetY = coarseY + targetDy;
-                          const size_t coarseNodeOffset = static_cast<size_t>(
-                              (targetY - firstStencilY) * stencilWidth +
-                              (targetX - firstStencilX)) * size_t(2);
+                        }
+                      } else {
+                        const LO neighborXBegin = fineX == 0 ? LO(0) : fineX - 1;
+                        const LO neighborXEnd =
+                            fineX + 1 < localFineNodes[0] ? fineX + 1 : fineX;
+                        const LO neighborYBegin = fineY == 0 ? LO(0) : fineY - 1;
+                        const LO neighborYEnd =
+                            fineY + 1 < localFineNodes[1] ? fineY + 1 : fineY;
+                        size_t nodalStencilEntry = 0;
 
-                          for (LO columnDof = 0; columnDof < LO(2);
-                               ++columnDof) {
-                            const size_t entryOffset =
-                                coarseNodeOffset + static_cast<size_t>(columnDof);
-                            // Piecewise-constant P and R=P^T both contribute
-                            // unit weights; no transfer entry is accessed.
-                            localAc.values(acBegin0 + entryOffset) +=
-                                aStencil.value(aBegin0, nodalStencilEntry, columnDof);
-                            localAc.values(acBegin1 + entryOffset) +=
-                                aStencil.value(aBegin1, nodalStencilEntry, columnDof);
+                        for (LO neighborY = neighborYBegin;
+                             neighborY <= neighborYEnd; ++neighborY) {
+                          const LO targetY = fineYToCoarseY(
+                              static_cast<size_t>(neighborY));
+                          for (LO neighborX = neighborXBegin;
+                               neighborX <= neighborXEnd; ++neighborX) {
+                            const LO targetX = fineXToCoarseX(
+                                static_cast<size_t>(neighborX));
+                            const size_t coarseNodeOffset = static_cast<size_t>(
+                                (targetY - firstStencilY) * stencilWidth +
+                                (targetX - firstStencilX)) * size_t(2);
+
+                            for (LO columnDof = 0; columnDof < LO(2);
+                                 ++columnDof) {
+                              const size_t entryOffset =
+                                  coarseNodeOffset + static_cast<size_t>(columnDof);
+                              localAc.values(acBegin0 + entryOffset) +=
+                                  aStencil.value(aBegin0, nodalStencilEntry, columnDof);
+                              localAc.values(acBegin1 + entryOffset) +=
+                                  aStencil.value(aBegin1, nodalStencilEntry, columnDof);
+                            }
+                            ++nodalStencilEntry;
                           }
-                          ++nodalStencilEntry;
                         }
                       }
                     }
