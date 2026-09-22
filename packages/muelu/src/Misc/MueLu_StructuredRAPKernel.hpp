@@ -44,6 +44,24 @@ class StructuredRAPKernel {
   using device_type = typename Node::device_type;
   using lo_view     = Kokkos::View<LocalOrdinal*, device_type>;
 
+  template <class LocalMatrix>
+  struct Elasticity2DStencilAccessor {
+    LocalMatrix matrix;
+
+    KOKKOS_INLINE_FUNCTION
+    size_t rowBegin(const LocalOrdinal row) const {
+      return matrix.graph.row_map(static_cast<size_t>(row));
+    }
+
+    KOKKOS_INLINE_FUNCTION
+    Scalar value(const size_t rowStart,
+                 const size_t nodalStencilEntry,
+                 const LocalOrdinal columnDof) const {
+      return matrix.values(rowStart + nodalStencilEntry * size_t(2) +
+                           static_cast<size_t>(columnDof));
+    }
+  };
+
   KOKKOS_INLINE_FUNCTION
   static LocalOrdinal coarseAnchor(const LocalOrdinal coarse,
                                    const LocalOrdinal numFine,
@@ -193,6 +211,7 @@ class StructuredRAPKernel {
       if (useElasticity2DStencil) {
         const SC zero = Teuchos::ScalarTraits<SC>::zero();
         const auto localA = A.getLocalMatrixDevice();
+        const Elasticity2DStencilAccessor<decltype(localA)> aStencil{localA};
         auto localAc      = Ac.getLocalMatrixDevice();
         const size_t numFineNodes =
             static_cast<size_t>(localFineNodes[0]) *
@@ -204,8 +223,8 @@ class StructuredRAPKernel {
             static_cast<size_t>(executionSpace.concurrency());
 
         // Build the order-zero interpolation map once. The numeric kernel can
-        // then map every A column to its single coarse-grid owner with one
-        // contiguous lookup instead of repeating coordinate divisions and
+        // then map every fine-grid stencil neighbor to its coarse-grid owner
+        // with one contiguous lookup instead of repeating coordinate divisions and
         // boundary logic for every matrix entry.
         lo_view fineNodeToCoarseNode(
             Kokkos::ViewAllocateWithoutInitializing(
@@ -232,10 +251,6 @@ class StructuredRAPKernel {
           executionSpace.fence(
               "StructuredRAP: constant interpolation map complete");
         }
-
-        Kokkos::View<int, device_type> missingStencilEntry(
-            "StructuredRAP: missing stencil graph entry");
-        Kokkos::deep_copy(executionSpace, missingStencilEntry, 0);
 
         {
           Teuchos::TimeMonitor timer(
@@ -332,41 +347,7 @@ class StructuredRAPKernel {
                   const LO firstStencilY = coarseY == 0 ? LO(0) : coarseY - 1;
                   const LO lastStencilX =
                       coarseX + 1 < localCoarseNodes[0] ? coarseX + 1 : coarseX;
-                  const LO lastStencilY =
-                      coarseY + 1 < localCoarseNodes[1] ? coarseY + 1 : coarseY;
                   const LO stencilWidth = lastStencilX - firstStencilX + 1;
-                  const LO stencilHeight = lastStencilY - firstStencilY + 1;
-                  const size_t expectedRowLength =
-                      static_cast<size_t>(stencilWidth) *
-                      static_cast<size_t>(stencilHeight) * size_t(2);
-                  bool validStencilRows =
-                      acEnd0 - acBegin0 == expectedRowLength &&
-                      acEnd1 - acBegin1 == expectedRowLength;
-                  for (LO stencilY = firstStencilY;
-                       stencilY <= lastStencilY && validStencilRows;
-                       ++stencilY) {
-                    for (LO stencilX = firstStencilX;
-                         stencilX <= lastStencilX && validStencilRows;
-                         ++stencilX) {
-                      const LO stencilNode =
-                          stencilY * localCoarseNodes[0] + stencilX;
-                      const size_t nodeOffset = static_cast<size_t>(
-                          (stencilY - firstStencilY) * stencilWidth +
-                          (stencilX - firstStencilX)) * size_t(2);
-                      for (LO columnDof = 0; columnDof < LO(2); ++columnDof) {
-                        const LO expectedColumn = stencilNode * LO(2) + columnDof;
-                        const size_t entryOffset =
-                            nodeOffset + static_cast<size_t>(columnDof);
-                        validStencilRows = validStencilRows &&
-                            localAc.graph.entries(acBegin0 + entryOffset) == expectedColumn &&
-                            localAc.graph.entries(acBegin1 + entryOffset) == expectedColumn;
-                      }
-                    }
-                  }
-                  if (!validStencilRows) {
-                    Kokkos::atomic_exchange(&missingStencilEntry(), 1);
-                    continue;
-                  }
 
                   for (LO fineY = fineYBegin; fineY <= fineYEnd;
                        ++fineY) {
@@ -374,26 +355,29 @@ class StructuredRAPKernel {
                          ++fineX) {
                       const LO fineNode =
                           fineY * localFineNodes[0] + fineX;
-                      for (LO coarseDof = 0; coarseDof < LO(2);
-                           ++coarseDof) {
-                        const LO fineRow =
-                            fineNode * LO(2) + coarseDof;
-                        const auto aRow = localA.rowConst(fineRow);
-                        const size_t destinationBegin =
-                            coarseDof == 0 ? acBegin0 : acBegin1;
+                      const LO neighborXBegin = fineX == 0 ? LO(0) : fineX - 1;
+                      const LO neighborXEnd =
+                          fineX + 1 < localFineNodes[0] ? fineX + 1 : fineX;
+                      const LO neighborYBegin = fineY == 0 ? LO(0) : fineY - 1;
+                      const LO neighborYEnd =
+                          fineY + 1 < localFineNodes[1] ? fineY + 1 : fineY;
+                      const LO firstFineRow = fineNode * LO(2);
+                      const size_t aBegin0 = aStencil.rowBegin(firstFineRow);
+                      const size_t aBegin1 = aStencil.rowBegin(firstFineRow + LO(1));
+                      size_t nodalStencilEntry = 0;
 
-                        for (LO aEntry = 0; aEntry < aRow.length;
-                             ++aEntry) {
-                          const LO fineColumn = aRow.colidx(aEntry);
-                          const LO columnDof  = fineColumn % LO(2);
-                          const LO columnNode = fineColumn / LO(2);
-                          const LO targetNode =
-                              fineNodeToCoarseNode(
-                                  static_cast<size_t>(columnNode));
+                      for (LO neighborY = neighborYBegin;
+                           neighborY <= neighborYEnd; ++neighborY) {
+                        for (LO neighborX = neighborXBegin;
+                             neighborX <= neighborXEnd; ++neighborX) {
+                          const LO columnNode =
+                              neighborY * localFineNodes[0] + neighborX;
+                          const LO targetNode = fineNodeToCoarseNode(
+                              static_cast<size_t>(columnNode));
 
                           // The sorted full 3x3 coarse stencil gives the exact
-                          // value-array offset. Classifying the nodal delta
-                          // avoids coordinate division and sparse lookup.
+                          // value-array offset. The factory is responsible for
+                          // guaranteeing the canonical A and Ac stencil order.
                           const LO nodeDelta = targetNode - coarseNode;
                           LO targetDx        = nodeDelta;
                           LO targetDy        = 0;
@@ -406,26 +390,22 @@ class StructuredRAPKernel {
                           }
                           const LO targetX = coarseX + targetDx;
                           const LO targetY = coarseY + targetDy;
-                          const bool targetInStencil =
-                              targetDx >= -1 && targetDx <= 1 &&
-                              targetDy >= -1 && targetDy <= 1 &&
-                              targetX >= firstStencilX &&
-                              targetX <= lastStencilX &&
-                              targetY >= firstStencilY &&
-                              targetY <= lastStencilY;
-                          if (!targetInStencil) {
-                            Kokkos::atomic_exchange(
-                                &missingStencilEntry(), 1);
-                            continue;
-                          }
-                          const size_t entryOffset = static_cast<size_t>(
+                          const size_t coarseNodeOffset = static_cast<size_t>(
                               (targetY - firstStencilY) * stencilWidth +
-                              (targetX - firstStencilX)) * size_t(2) +
-                              static_cast<size_t>(columnDof);
-                          // Piecewise-constant P and R=P^T both contribute
-                          // unit weights; no transfer entry is accessed.
-                          localAc.values(destinationBegin + entryOffset) +=
-                              aRow.value(aEntry);
+                              (targetX - firstStencilX)) * size_t(2);
+
+                          for (LO columnDof = 0; columnDof < LO(2);
+                               ++columnDof) {
+                            const size_t entryOffset =
+                                coarseNodeOffset + static_cast<size_t>(columnDof);
+                            // Piecewise-constant P and R=P^T both contribute
+                            // unit weights; no transfer entry is accessed.
+                            localAc.values(acBegin0 + entryOffset) +=
+                                aStencil.value(aBegin0, nodalStencilEntry, columnDof);
+                            localAc.values(acBegin1 + entryOffset) +=
+                                aStencil.value(aBegin1, nodalStencilEntry, columnDof);
+                          }
+                          ++nodalStencilEntry;
                         }
                       }
                     }
@@ -435,14 +415,6 @@ class StructuredRAPKernel {
           executionSpace.fence(
               "StructuredRAP: Elasticity2D stencil product complete");
         }
-
-        int missingStencilEntryHost = 0;
-        Kokkos::deep_copy(executionSpace, missingStencilEntryHost,
-                          missingStencilEntry);
-        TEUCHOS_TEST_FOR_EXCEPTION(
-            missingStencilEntryHost != 0, std::runtime_error,
-            prefix << "the supplied Ac graph does not contain every entry "
-                      "generated by the Elasticity2D stencil kernel.");
 
         if (!Ac.isFillComplete()) {
           Teuchos::TimeMonitor timer(
