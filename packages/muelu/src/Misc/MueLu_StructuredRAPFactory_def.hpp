@@ -135,7 +135,9 @@ RCP<const ParameterList> StructuredRAPFactory<Scalar, LocalOrdinal, GlobalOrdina
       "Use P^T as the restriction operator. StructuredRAPFactory requires this option to be true.");
   validParamList->set<RCP<const FactoryBase>>("A", null, "Generating factory of the matrix A used during the prolongator smoothing process");
   validParamList->set<RCP<const FactoryBase>>("P", null, "Prolongator factory");
+  validParamList->set<RCP<const FactoryBase>>("lNodesPerDim", null, "Number of nodes per spatial dimension on the fine grid.");
   validParamList->set<RCP<const FactoryBase>>("lCoarseNodesPerDim", null, "Number of nodes per spatial dimension on the coarse grid.");
+  validParamList->set<RCP<const FactoryBase>>("numDimensions", null, "Number of spatial dimensions.");
   validParamList->set<RCP<const FactoryBase>>("structuredInterpolationOrder", null, "Interpolation order used to construct the structured prolongator.");
   validParamList->set<RCP<const FactoryBase>>(
       "matrixType", null, "Matrix type used to infer the structured RAP graph.");
@@ -196,6 +198,10 @@ void StructuredRAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::DeclareInp
   if (prebuildCoarseGraph) {
     Input(fineLevel, "lCoarseNodesPerDim");
     Input(fineLevel, "structuredInterpolationOrder");
+    if (pL.get<std::string>("rap: triple product implementation") == "structured") {
+      Input(fineLevel, "lNodesPerDim");
+      Input(fineLevel, "numDimensions");
+    }
 
     if (pL.get<std::string>("rap: matrix type").empty())
       Input(fineLevel, "matrixType");
@@ -858,6 +864,67 @@ void StructuredRAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Leve
     RCP<Matrix> P = Get<RCP<Matrix>>(coarseLevel, "P");
     // We don't have a valid P (e.g., # global aggregates = 0) so we bail.
     // This level will ultimately be removed in MueLu_Hierarchy_defs.h via a resize()
+    const std::string tripleProductImplementation =
+        pL.get<std::string>("rap: triple product implementation");
+    TEUCHOS_TEST_FOR_EXCEPTION(
+        tripleProductImplementation != "xpetra" && tripleProductImplementation != "structured",
+        Exceptions::RuntimeError,
+        "StructuredRAPFactory: unknown value \"" << tripleProductImplementation
+                                                   << "\" for \"rap: triple product implementation\". "
+                                                      "Valid values are \"xpetra\" and \"structured\".");
+
+    int interpolationOrder = 0;
+    int numDimensions      = 0;
+    std::string matrixType;
+    Teuchos::Array<LocalOrdinal> lFineNodesPerDim;
+    Teuchos::Array<LocalOrdinal> lCoarseNodesPerDim;
+    Teuchos::Array<int> structuredCoarseningRate;
+    if (prebuildCoarseGraph) {
+      lCoarseNodesPerDim =
+          Get<Teuchos::Array<LocalOrdinal>>(fineLevel, "lCoarseNodesPerDim");
+      matrixType = pL.get<std::string>("rap: matrix type");
+      if (matrixType.empty())
+        matrixType = Get<std::string>(fineLevel, "matrixType");
+    }
+    if (tripleProductImplementation == "structured") {
+      interpolationOrder = Get<int>(fineLevel, "structuredInterpolationOrder");
+      numDimensions      = Get<int>(fineLevel, "numDimensions");
+      lFineNodesPerDim   = Get<Teuchos::Array<LocalOrdinal>>(fineLevel, "lNodesPerDim");
+
+      // lCoarseNodesPerDim and structuredInterpolationOrder are produced by
+      // StructuredAggregationFactory. Read the rate from that same producer
+      // so the structured RAP path uses the existing
+      // "aggregation: coarsening rate" setting instead of requiring a second,
+      // potentially inconsistent RAP-specific parameter.
+      const RCP<const FactoryBase> structuredDataFactory =
+          GetFactory("lCoarseNodesPerDim");
+      const Factory* structuredFactory =
+          dynamic_cast<const Factory*>(structuredDataFactory.get());
+      TEUCHOS_TEST_FOR_EXCEPTION(
+          structuredFactory == nullptr, Exceptions::RuntimeError,
+          "StructuredRAPFactory: the factory producing lCoarseNodesPerDim "
+          "does not expose its aggregation parameters.");
+      const ParameterList& structuredParameters =
+          structuredFactory->GetParameterList();
+      TEUCHOS_TEST_FOR_EXCEPTION(
+          !structuredParameters.isType<std::string>(
+              "aggregation: coarsening rate"),
+          Exceptions::RuntimeError,
+          "StructuredRAPFactory: the factory producing lCoarseNodesPerDim "
+          "does not provide the string parameter \"aggregation: coarsening "
+          "rate\".");
+      try {
+        structuredCoarseningRate = Teuchos::fromStringToArray<int>(
+            structuredParameters.get<std::string>(
+                "aggregation: coarsening rate"));
+      } catch (const Teuchos::InvalidArrayStringRepresentation& e) {
+        GetOStream(Errors, -1)
+            << " *** \"aggregation: coarsening rate\" must be a string "
+               "convertible into an array! *** "
+            << std::endl;
+        throw e;
+      }
+    }
     if (P.is_null()) {
       Ac = Teuchos::null;
       Set(coarseLevel, "A", Ac);
@@ -888,13 +955,8 @@ void StructuredRAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Leve
         // but that will be more expensive
       } else if (prebuildCoarseGraph) {
         // if reuse data not available, try to get sparse fill graph via the knowledge of the matrix structure
-        std::string matrixType = pL.get<std::string>("rap: matrix type");
-        if (matrixType.empty())
-          matrixType = Get<std::string>(fineLevel, "matrixType");
-        Teuchos::Array<LocalOrdinal> lCoarseNodesPerDim =
-            Get<Teuchos::Array<LocalOrdinal>>(fineLevel, "lCoarseNodesPerDim");
-        const int interpolationOrder        = Get<int>(fineLevel, "structuredInterpolationOrder");
-        const StructuredGraphSpec graphSpec = GetStructuredGraphSpec(matrixType, interpolationOrder);
+        const int graphInterpolationOrder   = Get<int>(fineLevel, "structuredInterpolationOrder");
+        const StructuredGraphSpec graphSpec = GetStructuredGraphSpec(matrixType, graphInterpolationOrder);
         GetOStream(Statistics1) << "StructuredRAP: Using " << graphSpec.description
                                 << " stencil with " << graphSpec.stencilOffsets.size()
                                 << " nodal entries." << std::endl;
@@ -908,15 +970,6 @@ void StructuredRAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Leve
       if (Ac.is_null())
         Ac = MatrixFactory::Build(P->getDomainMap(), Teuchos::as<LocalOrdinal>(0));
 
-      const std::string tripleProductImplementation =
-          pL.get<std::string>("rap: triple product implementation");
-      TEUCHOS_TEST_FOR_EXCEPTION(
-          tripleProductImplementation != "xpetra" && tripleProductImplementation != "structured",
-          Exceptions::RuntimeError,
-          "StructuredRAPFactory: unknown value \"" << tripleProductImplementation
-                                                     << "\" for \"rap: triple product implementation\". "
-                                                        "Valid values are \"xpetra\" and \"structured\".");
-
       if (tripleProductImplementation == "xpetra") {
         SubFactoryMonitor m2(*this, "MxMxM: Xpetra P^T x A x P (implicit)", coarseLevel);
         Xpetra::TripleMatrixMultiply<SC, LO, GO, NO>::
@@ -925,7 +978,10 @@ void StructuredRAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Leve
                         RAPparams);
       } else {
         SubFactoryMonitor m2(*this, "MxMxM: Structured P^T x A x P (implicit)", coarseLevel);
-        Details::StructuredRAPKernel<SC, LO, GO, NO>::Compute(*A, *P, *Ac, RAPparams);
+        Details::StructuredRAPKernel<SC, LO, GO, NO>::Compute(
+            *A, *P, *Ac, matrixType, interpolationOrder, numDimensions,
+            lFineNodesPerDim, lCoarseNodesPerDim,
+            structuredCoarseningRate, RAPparams);
       }
 
       GetOStream(Statistics1) << "StructuredRAP: Ac nnz (prebuild coarse graph = "

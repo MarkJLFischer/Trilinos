@@ -134,6 +134,7 @@ struct StructuredTransferData {
   Teuchos::RCP<Matrix> P;
   Teuchos::Array<LocalOrdinal> lCoarseNodesPerDim;
   int interpolationOrder;
+  Teuchos::RCP<const MueLu::FactoryBase> structuredDataFactory;
 };
 
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
@@ -198,6 +199,7 @@ buildStructuredTransferData(const StructuredProblemData<Scalar, LocalOrdinal, Gl
       fineLevel.Get<Teuchos::Array<LO> >("lCoarseNodesPerDim", aggregation.get());
   transferData.interpolationOrder =
       fineLevel.Get<int>("structuredInterpolationOrder", aggregation.get());
+  transferData.structuredDataFactory = aggregation;
   return transferData;
 }
 
@@ -216,8 +218,12 @@ buildCoarseMatrix(const StructuredProblemData<Scalar, LocalOrdinal, GlobalOrdina
   MueLu::Level fineLevel, coarseLevel;
   TestHelpers::TestFactory<SC, LO, GO, NO>::createTwoLevelHierarchy(fineLevel, coarseLevel);
   fineLevel.Set("A", problem.A);
-  fineLevel.Set("lCoarseNodesPerDim", transferData.lCoarseNodesPerDim);
-  fineLevel.Set("structuredInterpolationOrder", transferData.interpolationOrder);
+  fineLevel.Set("lNodesPerDim", problem.lNodesPerDim);
+  fineLevel.Set("numDimensions", problem.numDimensions);
+  fineLevel.Set("lCoarseNodesPerDim", transferData.lCoarseNodesPerDim,
+                transferData.structuredDataFactory.get());
+  fineLevel.Set("structuredInterpolationOrder", transferData.interpolationOrder,
+                transferData.structuredDataFactory.get());
   coarseLevel.Set("P", transferData.P);
 
   MueLu::StructuredRAPFactory<SC, LO, GO, NO> rap;
@@ -230,8 +236,10 @@ buildCoarseMatrix(const StructuredProblemData<Scalar, LocalOrdinal, GlobalOrdina
   rap.SetParameterList(rapParams);
   rap.SetFactory("A", MueLu::NoFactory::getRCP());
   rap.SetFactory("P", MueLu::NoFactory::getRCP());
-  rap.SetFactory("lCoarseNodesPerDim", MueLu::NoFactory::getRCP());
-  rap.SetFactory("structuredInterpolationOrder", MueLu::NoFactory::getRCP());
+  rap.SetFactory("lNodesPerDim", MueLu::NoFactory::getRCP());
+  rap.SetFactory("numDimensions", MueLu::NoFactory::getRCP());
+  rap.SetFactory("lCoarseNodesPerDim", transferData.structuredDataFactory);
+  rap.SetFactory("structuredInterpolationOrder", transferData.structuredDataFactory);
 
   coarseLevel.Request("A", &rap);
   coarseLevel.Request(rap);
