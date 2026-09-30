@@ -44,24 +44,6 @@ class StructuredRAPKernel {
   using device_type = typename Node::device_type;
   using lo_view     = Kokkos::View<LocalOrdinal*, device_type>;
 
-  template <class LocalMatrix>
-  struct Elasticity2DStencilAccessor {
-    LocalMatrix matrix;
-
-    KOKKOS_INLINE_FUNCTION
-    size_t rowBegin(const LocalOrdinal row) const {
-      return matrix.graph.row_map(static_cast<size_t>(row));
-    }
-
-    KOKKOS_INLINE_FUNCTION
-    Scalar value(const size_t rowStart,
-                 const size_t nodalStencilEntry,
-                 const LocalOrdinal columnDof) const {
-      return matrix.values(rowStart + nodalStencilEntry * size_t(2) +
-                           static_cast<size_t>(columnDof));
-    }
-  };
-
   KOKKOS_INLINE_FUNCTION
   static LocalOrdinal coarseAnchor(const LocalOrdinal coarse,
                                    const LocalOrdinal numFine,
@@ -89,12 +71,12 @@ class StructuredRAPKernel {
   }
 
  public:
+  template <class FineStencil>
   static void Compute(const Matrix& A,
                       const Matrix& P,
                       Matrix& Ac,
-                      const std::string& matrixType,
+                      const FineStencil& fineStencil,
                       const int interpolationOrder,
-                      const int numDimensions,
                       const Teuchos::Array<LocalOrdinal>& lFineNodesPerDim,
                       const Teuchos::Array<LocalOrdinal>& lCoarseNodesPerDim,
                       const Teuchos::Array<int>& structuredCoarseningRate,
@@ -109,18 +91,27 @@ class StructuredRAPKernel {
     const std::string prefix      = "MueLu::Details::StructuredRAPKernel::Compute: ";
     const std::string timerPrefix = "MueLu: StructuredRAPKernel: ";
 
-    TEUCHOS_TEST_FOR_EXCEPTION(matrixType != "Elasticity2D",
-                               std::runtime_error,
-                               prefix << "only the Elasticity2D stencil is implemented.");
+    const int numDimensions = fineStencil.numDimensions;
+    const LO dofsPerNode     = fineStencil.dofsPerNode;
+
     TEUCHOS_TEST_FOR_EXCEPTION(!executionSpaceIsHost,
                                std::runtime_error,
-                               prefix << "the Elasticity2D specialization requires host memory.");
+                               prefix << "the current structured specialization requires host memory.");
     TEUCHOS_TEST_FOR_EXCEPTION(interpolationOrder != 0,
                                std::runtime_error,
-                               prefix << "the Elasticity2D specialization requires order-zero interpolation.");
+                               prefix << "the current structured specialization requires order-zero interpolation.");
     TEUCHOS_TEST_FOR_EXCEPTION(numDimensions != 2,
                                std::runtime_error,
-                               prefix << "the Elasticity2D specialization requires two dimensions.");
+                               prefix << "the current structured specialization requires two dimensions.");
+    TEUCHOS_TEST_FOR_EXCEPTION(fineStencil.dofsPerNode != LocalOrdinal(2),
+                               std::runtime_error,
+                               prefix << "the current structured specialization requires two DOFs per node.");
+    TEUCHOS_TEST_FOR_EXCEPTION(fineStencil.stencilOffsets.size() != size_t(9),
+                               std::runtime_error,
+                               prefix << "the current structured specialization requires a full nine-point stencil.");
+    TEUCHOS_TEST_FOR_EXCEPTION(fineStencil.entries.size() != size_t(36),
+                               std::runtime_error,
+                               prefix << "the current structured specialization requires 36 scalar stencil entries.");
     TEUCHOS_TEST_FOR_EXCEPTION(lFineNodesPerDim.size() < 2 || lCoarseNodesPerDim.size() < 2,
                                std::runtime_error,
                                prefix << "two fine- and coarse-grid dimensions are required.");
@@ -195,10 +186,12 @@ class StructuredRAPKernel {
       const size_t expectedCoarseRows =
           static_cast<size_t>(localCoarseNodes[0]) *
           static_cast<size_t>(localCoarseNodes[1]) * size_t(2);
-      const bool useElasticity2DStencil =
-          matrixType == "Elasticity2D" &&
+      const bool useDetectedStencil =
           interpolationOrder == 0 &&
           numDimensions == 2 &&
+          fineStencil.dofsPerNode == LO(2) &&
+          fineStencil.stencilOffsets.size() == size_t(9) &&
+          fineStencil.entries.size() == size_t(36) &&
           structuredDimensionsMatch &&
           A.GetFixedBlockSize() == 2 &&
           localCoarseNodes[0] >= LO(3) &&
@@ -208,11 +201,40 @@ class StructuredRAPKernel {
           A.getRowMap()->getLocalNumElements() == expectedFineRows &&
           Ac.getRowMap()->getLocalNumElements() == expectedCoarseRows;
 
-      if (useElasticity2DStencil) {
-        const SC zero = Teuchos::ScalarTraits<SC>::zero();
+      if (useDetectedStencil) {
+        const SC zero  = Teuchos::ScalarTraits<SC>::zero();
         const auto localA = A.getLocalMatrixDevice();
-        const Elasticity2DStencilAccessor<decltype(localA)> aStencil{localA};
         auto localAc      = Ac.getLocalMatrixDevice();
+
+        const size_t numFineStencilEntries = fineStencil.entries.size();
+        Kokkos::View<int*, device_type> stencilOffsetX(
+            "StructuredRAP: fine stencil X offsets", numFineStencilEntries);
+        Kokkos::View<int*, device_type> stencilOffsetY(
+            "StructuredRAP: fine stencil Y offsets", numFineStencilEntries);
+        lo_view stencilRowDof(
+            "StructuredRAP: fine stencil row DOFs", numFineStencilEntries);
+        lo_view stencilColumnDof(
+            "StructuredRAP: fine stencil column DOFs", numFineStencilEntries);
+        lo_view stencilEntryOrdinal(
+            "StructuredRAP: fine stencil entry ordinals", numFineStencilEntries);
+
+        auto stencilOffsetXHost = Kokkos::create_mirror_view(stencilOffsetX);
+        auto stencilOffsetYHost = Kokkos::create_mirror_view(stencilOffsetY);
+        auto stencilRowDofHost = Kokkos::create_mirror_view(stencilRowDof);
+        auto stencilColumnDofHost = Kokkos::create_mirror_view(stencilColumnDof);
+        auto stencilEntryOrdinalHost = Kokkos::create_mirror_view(stencilEntryOrdinal);
+        for (size_t entry = 0; entry < numFineStencilEntries; ++entry) {
+          stencilOffsetXHost(entry) = fineStencil.entries[entry].offset.x;
+          stencilOffsetYHost(entry) = fineStencil.entries[entry].offset.y;
+          stencilRowDofHost(entry) = fineStencil.entries[entry].rowDof;
+          stencilColumnDofHost(entry) = fineStencil.entries[entry].columnDof;
+          stencilEntryOrdinalHost(entry) = fineStencil.entries[entry].entryOrdinal;
+        }
+        Kokkos::deep_copy(executionSpace, stencilOffsetX, stencilOffsetXHost);
+        Kokkos::deep_copy(executionSpace, stencilOffsetY, stencilOffsetYHost);
+        Kokkos::deep_copy(executionSpace, stencilRowDof, stencilRowDofHost);
+        Kokkos::deep_copy(executionSpace, stencilColumnDof, stencilColumnDofHost);
+        Kokkos::deep_copy(executionSpace, stencilEntryOrdinal, stencilEntryOrdinalHost);
         const size_t numCoarseNodes =
             static_cast<size_t>(localCoarseNodes[0]) *
             static_cast<size_t>(localCoarseNodes[1]);
@@ -276,9 +298,6 @@ class StructuredRAPKernel {
                   const size_t firstCoarseRow = coarseNodeIndex * size_t(2);
                   const size_t acBegin0 =
                       localAc.graph.row_map(firstCoarseRow);
-                  const size_t acEnd0 =
-                      localAc.graph.row_map(firstCoarseRow + 1);
-                  const size_t acBegin1 = acEnd0;
                   const size_t acEnd1 =
                       localAc.graph.row_map(firstCoarseRow + 2);
                   for (size_t acEntry = acBegin0;
@@ -357,72 +376,66 @@ class StructuredRAPKernel {
                          ++fineX) {
                       const LO fineNode =
                           fineY * localFineNodes[0] + fineX;
-                      const LO firstFineRow = fineNode * LO(2);
-                      const size_t aBegin0 = aStencil.rowBegin(firstFineRow);
-                      const size_t aBegin1 = aStencil.rowBegin(firstFineRow + LO(1));
+                      const LO firstFineRow = fineNode * dofsPerNode;
                       const bool interior =
                           fineX > 0 && fineX + 1 < localFineNodes[0] &&
                           fineY > 0 && fineY + 1 < localFineNodes[1];
 
-                      if (interior) {
-                        size_t nodalStencilEntry = 0;
-                        for (LO neighborY = fineY - 1;
-                             neighborY <= fineY + 1; ++neighborY) {
-                          const LO targetY = fineYToCoarseY(
-                              static_cast<size_t>(neighborY));
-                          for (LO neighborX = fineX - 1;
-                               neighborX <= fineX + 1; ++neighborX) {
-                            const LO targetX = fineXToCoarseX(
-                                static_cast<size_t>(neighborX));
-                            const size_t coarseNodeOffset = static_cast<size_t>(
-                                (targetY - firstStencilY) * stencilWidth +
-                                (targetX - firstStencilX)) * size_t(2);
+                      for (size_t stencilEntry = 0;
+                           stencilEntry < numFineStencilEntries;
+                           ++stencilEntry) {
+                        const LO neighborX =
+                            fineX + static_cast<LO>(stencilOffsetX(stencilEntry));
+                        const LO neighborY =
+                            fineY + static_cast<LO>(stencilOffsetY(stencilEntry));
+                        if (neighborX < LO(0) || neighborX >= localFineNodes[0] ||
+                            neighborY < LO(0) || neighborY >= localFineNodes[1])
+                          continue;
 
-                            for (LO columnDof = 0; columnDof < LO(2);
-                                 ++columnDof) {
-                              const size_t entryOffset =
-                                  coarseNodeOffset + static_cast<size_t>(columnDof);
-                              localAc.values(acBegin0 + entryOffset) +=
-                                  aStencil.value(aBegin0, nodalStencilEntry, columnDof);
-                              localAc.values(acBegin1 + entryOffset) +=
-                                  aStencil.value(aBegin1, nodalStencilEntry, columnDof);
+                        const LO rowDof = stencilRowDof(stencilEntry);
+                        const LO columnDof = stencilColumnDof(stencilEntry);
+                        const LO targetX = fineXToCoarseX(
+                            static_cast<size_t>(neighborX));
+                        const LO targetY = fineYToCoarseY(
+                            static_cast<size_t>(neighborY));
+                        const size_t coarseNodeOffset = static_cast<size_t>(
+                            (targetY - firstStencilY) * stencilWidth +
+                            (targetX - firstStencilX)) * size_t(2);
+                        const size_t acRowBegin =
+                            localAc.graph.row_map(firstCoarseRow +
+                                                  static_cast<size_t>(rowDof));
+                        const size_t acEntry =
+                            acRowBegin + coarseNodeOffset +
+                            static_cast<size_t>(columnDof);
+
+                        const size_t aRow =
+                            static_cast<size_t>(firstFineRow + rowDof);
+                        const size_t aRowBegin =
+                            localA.graph.row_map(aRow);
+                        size_t aEntry =
+                            aRowBegin +
+                            static_cast<size_t>(stencilEntryOrdinal(stencilEntry));
+
+                        if (!interior) {
+                          const LO neighborNode =
+                              neighborY * localFineNodes[0] + neighborX;
+                          const LO expectedColumn =
+                              neighborNode * dofsPerNode + columnDof;
+                          const size_t aRowEnd =
+                              localA.graph.row_map(aRow + size_t(1));
+                          aEntry = aRowEnd;
+                          for (size_t candidate = aRowBegin;
+                               candidate < aRowEnd; ++candidate) {
+                            if (localA.graph.entries(candidate) == expectedColumn) {
+                              aEntry = candidate;
+                              break;
                             }
-                            ++nodalStencilEntry;
                           }
+                          if (aEntry == aRowEnd)
+                            continue;
                         }
-                      } else {
-                        const LO neighborXBegin = fineX == 0 ? LO(0) : fineX - 1;
-                        const LO neighborXEnd =
-                            fineX + 1 < localFineNodes[0] ? fineX + 1 : fineX;
-                        const LO neighborYBegin = fineY == 0 ? LO(0) : fineY - 1;
-                        const LO neighborYEnd =
-                            fineY + 1 < localFineNodes[1] ? fineY + 1 : fineY;
-                        size_t nodalStencilEntry = 0;
 
-                        for (LO neighborY = neighborYBegin;
-                             neighborY <= neighborYEnd; ++neighborY) {
-                          const LO targetY = fineYToCoarseY(
-                              static_cast<size_t>(neighborY));
-                          for (LO neighborX = neighborXBegin;
-                               neighborX <= neighborXEnd; ++neighborX) {
-                            const LO targetX = fineXToCoarseX(
-                                static_cast<size_t>(neighborX));
-                            const size_t coarseNodeOffset = static_cast<size_t>(
-                                (targetY - firstStencilY) * stencilWidth +
-                                (targetX - firstStencilX)) * size_t(2);
-
-                            for (LO columnDof = 0; columnDof < LO(2);
-                                 ++columnDof) {
-                              const size_t entryOffset =
-                                  coarseNodeOffset + static_cast<size_t>(columnDof);
-                              localAc.values(acBegin0 + entryOffset) +=
-                                  aStencil.value(aBegin0, nodalStencilEntry, columnDof);
-                              localAc.values(acBegin1 + entryOffset) +=
-                                  aStencil.value(aBegin1, nodalStencilEntry, columnDof);
-                            }
-                            ++nodalStencilEntry;
-                          }
-                        }
+                        localAc.values(acEntry) += localA.values(aEntry);
                       }
                     }
                   }
@@ -444,9 +457,9 @@ class StructuredRAPKernel {
 
     TEUCHOS_TEST_FOR_EXCEPTION(
         true, std::runtime_error,
-        prefix << "only the serial host Elasticity2D order-zero full-stencil "
-                  "specialization is implemented; no generic triple-matrix-product "
-                  "fallback is available.");
+        prefix << "only the serial host two-dimensional, two-DOF, order-zero "
+                  "nine-point specialization is currently implemented; no generic "
+                  "triple-matrix-product fallback is available.");
   }
 };
 
