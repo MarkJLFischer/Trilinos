@@ -169,19 +169,14 @@ computeStructuredRAP(
   using LO        = LocalOrdinal;
   using GO        = GlobalOrdinal;
   using NO        = Node;
-  using Matrix    = Xpetra::Matrix<SC, LO, GO, NO>;
-  using RAPFactory   = MueLu::StructuredRAPFactory<SC, LO, GO, NO>;
-  using StencilOffset = typename RAPFactory::StencilOffset;
+  using Matrix     = Xpetra::Matrix<SC, LO, GO, NO>;
+  using RAPFactory = MueLu::StructuredRAPFactory<SC, LO, GO, NO>;
 
   RAPFactory rapFactory;
-  typename RAPFactory::StructuredGraphSpec graphSpec;
-  graphSpec.numDimensions = 2;
-  graphSpec.dofsPerNode   = Teuchos::as<LO>(2);
-  graphSpec.description   = "Elasticity2D unit-test full stencil";
-  for (int dy = -1; dy <= 1; ++dy)
-    for (int dx = -1; dx <= 1; ++dx)
-      graphSpec.stencilOffsets.push_back(
-          StencilOffset{dx, dy, 0});
+  const typename RAPFactory::FineStencilSpec fineStencil =
+      rapFactory.DetectFineStencil(*data.A, 2, data.fineNodesPerDim);
+  const typename RAPFactory::StructuredGraphSpec graphSpec =
+      rapFactory.DeriveCoarseRAPStencil(fineStencil, 0);
 
   Teuchos::RCP<Matrix> Ac;
   rapFactory.GetStructuredGraph(Ac, data.P, data.coarseNodesPerDim,
@@ -191,8 +186,8 @@ computeStructuredRAP(
   Teuchos::RCP<Teuchos::ParameterList> kernelParams =
       Teuchos::rcp(new Teuchos::ParameterList());
   MueLu::Details::StructuredRAPKernel<SC, LO, GO, NO>::Compute(
-      *data.A, *data.P, *Ac, "Elasticity2D", 0, 2,
-      data.fineNodesPerDim, data.coarseNodesPerDim, rate, kernelParams);
+      *data.A, *data.P, *Ac, fineStencil, 0, data.fineNodesPerDim,
+      data.coarseNodesPerDim, rate, kernelParams);
   return Ac;
 }
 
