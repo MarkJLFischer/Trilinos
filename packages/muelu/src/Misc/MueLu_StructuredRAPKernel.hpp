@@ -4,22 +4,21 @@
 //
 // Copyright 2012 NTESS and the MueLu contributors.
 // SPDX-License-Identifier: BSD-3-Clause
-// *****************************************************************************
 // @HEADER
 
 #ifndef MUELU_STRUCTUREDRAPKERNEL_HPP
 #define MUELU_STRUCTUREDRAPKERNEL_HPP
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
-#include <type_traits>
+#include <vector>
 
 #include <Kokkos_Core.hpp>
 
 #include <Teuchos_Array.hpp>
 #include <Teuchos_ParameterList.hpp>
 #include <Teuchos_ScalarTraits.hpp>
-#include <Teuchos_TestForException.hpp>
 #include <Teuchos_TimeMonitor.hpp>
 
 #include <Xpetra_Matrix.hpp>
@@ -28,12 +27,11 @@ namespace MueLu {
 namespace Details {
 
 /**
- * Specialized numeric kernel for the serial host Elasticity2D stencil.
+ * Specialized numeric kernel for single-rank, two-dimensional structured RAP.
  *
- * The implemented path requires two dimensions, two degrees of freedom per
- * node, order-zero interpolation, and the full radius-one coarse stencil.
- * Unsupported configurations are rejected; no generic sparse RAP fallback is
- * provided.
+ * The implemented path requires two dimensions and order-zero interpolation.
+ * Its numeric plan is generated from the detected fine stencil and sparse
+ * graphs; no generic sparse RAP fallback is provided.
  */
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 class StructuredRAPKernel {
@@ -43,6 +41,7 @@ class StructuredRAPKernel {
  private:
   using device_type = typename Node::device_type;
   using lo_view     = Kokkos::View<LocalOrdinal*, device_type>;
+  using size_view   = Kokkos::View<size_t*, device_type>;
 
   KOKKOS_INLINE_FUNCTION
   static LocalOrdinal coarseAnchor(const LocalOrdinal coarse,
@@ -84,361 +83,760 @@ class StructuredRAPKernel {
     using LO              = LocalOrdinal;
     using SC              = Scalar;
     using execution_space = typename device_type::execution_space;
-    using range_policy    = Kokkos::RangePolicy<execution_space, Kokkos::IndexType<size_t>>;
-    static constexpr bool executionSpaceIsHost =
-        std::is_same<typename device_type::memory_space, Kokkos::HostSpace>::value;
+    using range_policy    = Kokkos::RangePolicy<execution_space,
+                                                Kokkos::IndexType<size_t>>;
+    static constexpr size_t coarseNodesPerTile = 8;
 
-    const std::string prefix      = "MueLu::Details::StructuredRAPKernel::Compute: ";
     const std::string timerPrefix = "MueLu: StructuredRAPKernel: ";
 
     const int numDimensions = fineStencil.numDimensions;
     const LO dofsPerNode     = fineStencil.dofsPerNode;
 
-    TEUCHOS_TEST_FOR_EXCEPTION(!executionSpaceIsHost,
-                               std::runtime_error,
-                               prefix << "the current structured specialization requires host memory.");
-    TEUCHOS_TEST_FOR_EXCEPTION(interpolationOrder != 0,
-                               std::runtime_error,
-                               prefix << "the current structured specialization requires order-zero interpolation.");
-    TEUCHOS_TEST_FOR_EXCEPTION(numDimensions != 2,
-                               std::runtime_error,
-                               prefix << "the current structured specialization requires two dimensions.");
-    TEUCHOS_TEST_FOR_EXCEPTION(fineStencil.dofsPerNode != LocalOrdinal(2),
-                               std::runtime_error,
-                               prefix << "the current structured specialization requires two DOFs per node.");
-    TEUCHOS_TEST_FOR_EXCEPTION(fineStencil.stencilOffsets.size() != size_t(9),
-                               std::runtime_error,
-                               prefix << "the current structured specialization requires a full nine-point stencil.");
-    TEUCHOS_TEST_FOR_EXCEPTION(fineStencil.entries.size() != size_t(36),
-                               std::runtime_error,
-                               prefix << "the current structured specialization requires 36 scalar stencil entries.");
-    TEUCHOS_TEST_FOR_EXCEPTION(lFineNodesPerDim.size() < 2 || lCoarseNodesPerDim.size() < 2,
-                               std::runtime_error,
-                               prefix << "two fine- and coarse-grid dimensions are required.");
-    TEUCHOS_TEST_FOR_EXCEPTION(structuredCoarseningRate.empty(),
-                               std::runtime_error,
-                               prefix << "the Elasticity2D specialization requires a coarsening rate.");
     Kokkos::Array<LO, 3> localFineNodes{{Teuchos::as<LO>(1), Teuchos::as<LO>(1), Teuchos::as<LO>(1)}};
     Kokkos::Array<LO, 3> localCoarseNodes{{Teuchos::as<LO>(1), Teuchos::as<LO>(1), Teuchos::as<LO>(1)}};
     Kokkos::Array<LO, 3> coarseningRate{{Teuchos::as<LO>(1), Teuchos::as<LO>(1), Teuchos::as<LO>(1)}};
     for (int dim = 0; dim < numDimensions; ++dim) {
-      TEUCHOS_TEST_FOR_EXCEPTION(lFineNodesPerDim[dim] <= 0, std::runtime_error,
-                                 prefix << "fine-grid dimensions must be positive.");
       localFineNodes[dim] = lFineNodesPerDim[dim];
+      localCoarseNodes[dim] = lCoarseNodesPerDim[dim];
+      coarseningRate[dim] = static_cast<LO>(
+          structuredCoarseningRate.size() == 1
+              ? structuredCoarseningRate[0]
+              : structuredCoarseningRate[dim]);
     }
-    const bool hasStructuredCoarseningRate = !structuredCoarseningRate.empty();
-    if (hasStructuredCoarseningRate) {
-      TEUCHOS_TEST_FOR_EXCEPTION(
-          lCoarseNodesPerDim.size() < numDimensions,
-          std::runtime_error,
-          prefix << "insufficient coarse-grid dimensions were supplied.");
-      TEUCHOS_TEST_FOR_EXCEPTION(
-          structuredCoarseningRate.size() != 1 &&
-              structuredCoarseningRate.size() < numDimensions,
-          std::runtime_error,
-          prefix << "the structured coarsening rate must contain one value or "
-                    "one value per active dimension.");
-      for (int dim = 0; dim < numDimensions; ++dim) {
-        const int rate = structuredCoarseningRate.size() == 1
-                             ? structuredCoarseningRate[0]
-                             : structuredCoarseningRate[dim];
-        TEUCHOS_TEST_FOR_EXCEPTION(rate <= 0 || lCoarseNodesPerDim[dim] <= 0,
-                                   std::runtime_error,
-                                   prefix << "coarsening rates and coarse-grid dimensions must be positive.");
-        localCoarseNodes[dim] = lCoarseNodesPerDim[dim];
-        coarseningRate[dim]   = static_cast<LO>(rate);
-      }
-    }
-
-    TEUCHOS_TEST_FOR_EXCEPTION(A.getRowMap()->lib() != Xpetra::UseTpetra,
-                               std::runtime_error,
-                               prefix << "only the Tpetra backend is supported.");
-    TEUCHOS_TEST_FOR_EXCEPTION(!A.isFillComplete() || !P.isFillComplete(),
-                               std::runtime_error,
-                               prefix << "A and P must be fill complete.");
-    TEUCHOS_TEST_FOR_EXCEPTION(!A.hasCrsGraph() || !P.hasCrsGraph() || !Ac.hasCrsGraph(),
-                               std::runtime_error,
-                               prefix << "A, P, and Ac must expose CrsGraph objects.");
-    TEUCHOS_TEST_FOR_EXCEPTION(!A.getRowMap()->isSameAs(*P.getRowMap()),
-                               std::runtime_error,
-                               prefix << "the row maps of A and P must match.");
-    TEUCHOS_TEST_FOR_EXCEPTION(!P.getDomainMap()->isSameAs(*Ac.getRowMap()),
-                               std::runtime_error,
-                               prefix << "the domain map of P must match the row map of Ac.");
 
     execution_space executionSpace;
-    if constexpr (executionSpaceIsHost) {
-      bool structuredDimensionsMatch = hasStructuredCoarseningRate;
-      for (int dim = 0; dim < numDimensions && structuredDimensionsMatch; ++dim) {
-        const LO expectedCoarseNodes =
-            localFineNodes[dim] == 1
-                ? LO(1)
-                : static_cast<LO>((localFineNodes[dim] - 2) /
-                                      coarseningRate[dim] +
-                                  2);
-        structuredDimensionsMatch =
-            localCoarseNodes[dim] == expectedCoarseNodes;
-      }
+    bool structuredDimensionsMatch = true;
+    for (int dim = 0; dim < numDimensions && structuredDimensionsMatch; ++dim) {
+      const LO expectedCoarseNodes =
+          localFineNodes[dim] == 1
+              ? LO(1)
+              : static_cast<LO>((localFineNodes[dim] - 2) /
+                                    coarseningRate[dim] +
+                                2);
+      structuredDimensionsMatch =
+          localCoarseNodes[dim] == expectedCoarseNodes;
+    }
 
-      const size_t expectedFineRows =
-          static_cast<size_t>(localFineNodes[0]) *
-          static_cast<size_t>(localFineNodes[1]) * size_t(2);
-      const size_t expectedCoarseRows =
-          static_cast<size_t>(localCoarseNodes[0]) *
-          static_cast<size_t>(localCoarseNodes[1]) * size_t(2);
-      const bool useDetectedStencil =
-          interpolationOrder == 0 &&
-          numDimensions == 2 &&
-          fineStencil.dofsPerNode == LO(2) &&
-          fineStencil.stencilOffsets.size() == size_t(9) &&
-          fineStencil.entries.size() == size_t(36) &&
-          structuredDimensionsMatch &&
-          A.GetFixedBlockSize() == 2 &&
-          localCoarseNodes[0] >= LO(3) &&
-          A.getRowMap()->getComm()->getSize() == 1 &&
-          A.getColMap()->isSameAs(*A.getRowMap()) &&
-          Ac.getColMap()->isSameAs(*Ac.getRowMap()) &&
-          A.getRowMap()->getLocalNumElements() == expectedFineRows &&
-          Ac.getRowMap()->getLocalNumElements() == expectedCoarseRows;
+    const size_t expectedFineRows =
+        static_cast<size_t>(localFineNodes[0]) *
+        static_cast<size_t>(localFineNodes[1]) *
+        static_cast<size_t>(dofsPerNode);
+    const size_t expectedCoarseRows =
+        static_cast<size_t>(localCoarseNodes[0]) *
+        static_cast<size_t>(localCoarseNodes[1]) *
+        static_cast<size_t>(dofsPerNode);
+    const bool useDetectedStencil =
+        interpolationOrder == 0 &&
+        numDimensions == 2 &&
+        structuredDimensionsMatch &&
+        A.GetFixedBlockSize() == dofsPerNode &&
+        A.getRowMap()->getComm()->getSize() == 1 &&
+        A.getColMap()->isSameAs(*A.getRowMap()) &&
+        Ac.getColMap()->isSameAs(*Ac.getRowMap()) &&
+        A.getRowMap()->getLocalNumElements() == expectedFineRows &&
+        Ac.getRowMap()->getLocalNumElements() == expectedCoarseRows;
 
-      if (useDetectedStencil) {
+    if (useDetectedStencil) {
         const SC zero  = Teuchos::ScalarTraits<SC>::zero();
         const auto localA = A.getLocalMatrixDevice();
         auto localAc      = Ac.getLocalMatrixDevice();
 
+        const size_t numFineStencilOffsets = fineStencil.stencilOffsets.size();
         const size_t numFineStencilEntries = fineStencil.entries.size();
-        Kokkos::View<int*, device_type> stencilOffsetX(
-            "StructuredRAP: fine stencil X offsets", numFineStencilEntries);
-        Kokkos::View<int*, device_type> stencilOffsetY(
-            "StructuredRAP: fine stencil Y offsets", numFineStencilEntries);
-        lo_view stencilRowDof(
-            "StructuredRAP: fine stencil row DOFs", numFineStencilEntries);
-        lo_view stencilColumnDof(
-            "StructuredRAP: fine stencil column DOFs", numFineStencilEntries);
-        lo_view stencilEntryOrdinal(
-            "StructuredRAP: fine stencil entry ordinals", numFineStencilEntries);
-
-        auto stencilOffsetXHost = Kokkos::create_mirror_view(stencilOffsetX);
-        auto stencilOffsetYHost = Kokkos::create_mirror_view(stencilOffsetY);
-        auto stencilRowDofHost = Kokkos::create_mirror_view(stencilRowDof);
-        auto stencilColumnDofHost = Kokkos::create_mirror_view(stencilColumnDof);
-        auto stencilEntryOrdinalHost = Kokkos::create_mirror_view(stencilEntryOrdinal);
-        for (size_t entry = 0; entry < numFineStencilEntries; ++entry) {
-          stencilOffsetXHost(entry) = fineStencil.entries[entry].offset.x;
-          stencilOffsetYHost(entry) = fineStencil.entries[entry].offset.y;
-          stencilRowDofHost(entry) = fineStencil.entries[entry].rowDof;
-          stencilColumnDofHost(entry) = fineStencil.entries[entry].columnDof;
-          stencilEntryOrdinalHost(entry) = fineStencil.entries[entry].entryOrdinal;
+        int minStencilOffsetX = fineStencil.stencilOffsets[0].x;
+        int maxStencilOffsetX = fineStencil.stencilOffsets[0].x;
+        int minStencilOffsetY = fineStencil.stencilOffsets[0].y;
+        int maxStencilOffsetY = fineStencil.stencilOffsets[0].y;
+        for (size_t offset = 1; offset < numFineStencilOffsets; ++offset) {
+          minStencilOffsetX = std::min(
+              minStencilOffsetX, fineStencil.stencilOffsets[offset].x);
+          maxStencilOffsetX = std::max(
+              maxStencilOffsetX, fineStencil.stencilOffsets[offset].x);
+          minStencilOffsetY = std::min(
+              minStencilOffsetY, fineStencil.stencilOffsets[offset].y);
+          maxStencilOffsetY = std::max(
+              maxStencilOffsetY, fineStencil.stencilOffsets[offset].y);
         }
-        Kokkos::deep_copy(executionSpace, stencilOffsetX, stencilOffsetXHost);
-        Kokkos::deep_copy(executionSpace, stencilOffsetY, stencilOffsetYHost);
-        Kokkos::deep_copy(executionSpace, stencilRowDof, stencilRowDofHost);
-        Kokkos::deep_copy(executionSpace, stencilColumnDof, stencilColumnDofHost);
-        Kokkos::deep_copy(executionSpace, stencilEntryOrdinal, stencilEntryOrdinalHost);
         const size_t numCoarseNodes =
             static_cast<size_t>(localCoarseNodes[0]) *
             static_cast<size_t>(localCoarseNodes[1]);
-        const size_t numWorkers =
-            static_cast<size_t>(executionSpace.concurrency());
+        const size_t numScalarDofs = static_cast<size_t>(dofsPerNode);
+        const size_t invalidStencilNodeOrdinal =
+            static_cast<size_t>(-1);
 
-        // Build cache-resident one-dimensional ownership maps once.
-        lo_view fineXToCoarseX(
-            Kokkos::ViewAllocateWithoutInitializing(
-                "StructuredRAP: fine-X to coarse-X map"),
-            static_cast<size_t>(localFineNodes[0]));
-        lo_view fineYToCoarseY(
-            Kokkos::ViewAllocateWithoutInitializing(
-                "StructuredRAP: fine-Y to coarse-Y map"),
-            static_cast<size_t>(localFineNodes[1]));
+        lo_view coarseXAggregatePlanClass;
+        lo_view coarseYAggregatePlanClass;
+        size_view reverseContributionBegins;
+        size_view reverseContributionCounts;
+        size_view reverseFineNodeOffsets;
+        size_view reverseAEntryOrdinals;
+        size_view fineARowBegins;
+        size_t numXPlanClasses = 0;
+        size_t numYPlanClasses = 0;
+        size_t numXAggregatePlanClasses = 0;
+        size_t numYAggregatePlanClasses = 0;
+        size_t maxAcEntriesPerRow = 0;
+        size_t maxAEntriesPerRow = 0;
+        size_t maxFineNodesPerAggregate = 0;
         {
           Teuchos::TimeMonitor timer(
               *Teuchos::TimeMonitor::getNewTimer(
-                  timerPrefix + "build constant interpolation maps"));
-          Kokkos::parallel_for(
-              "StructuredRAP: build fine-X to coarse-X map",
-              range_policy(executionSpace, 0,
-                           static_cast<size_t>(localFineNodes[0])),
-              KOKKOS_LAMBDA(const size_t fineXIndex) {
-                const LO fineX = static_cast<LO>(fineXIndex);
-                fineXToCoarseX(fineXIndex) = constantInterpolationCoarse(
-                    fineX, localFineNodes[0], coarseningRate[0]);
-              });
-          Kokkos::parallel_for(
-              "StructuredRAP: build fine-Y to coarse-Y map",
-              range_policy(executionSpace, 0,
-                           static_cast<size_t>(localFineNodes[1])),
-              KOKKOS_LAMBDA(const size_t fineYIndex) {
-                const LO fineY = static_cast<LO>(fineYIndex);
-                fineYToCoarseY(fineYIndex) = constantInterpolationCoarse(
-                    fineY, localFineNodes[1], coarseningRate[1]);
-              });
-          executionSpace.fence(
-              "StructuredRAP: constant interpolation maps complete");
+                  timerPrefix + "prepare numeric entry plan"));
+
+          struct AxisPlanClass {
+            LO representativeFine;
+            LO representativeCoarse;
+          };
+
+          auto buildAxisPlanClasses = [&](const LO numFine,
+                                          const LO numCoarse,
+                                          const LO rate,
+                                          const int minOffset,
+                                          const int maxOffset,
+                                          const size_t leftDepth,
+                                          const size_t rightDepth,
+                                          Teuchos::Array<LO>& classByFine,
+                                          std::vector<AxisPlanClass>& classes) {
+            std::vector<std::vector<int>> signatures;
+            for (LO fine = 0; fine < numFine; ++fine) {
+              const LO coarse = constantInterpolationCoarse(
+                  fine, numFine, rate);
+              const size_t coarseIndex = static_cast<size_t>(coarse);
+              const size_t rightDistance =
+                  static_cast<size_t>(numCoarse - coarse - LO(1));
+              const size_t boundaryClass =
+                  coarseIndex < leftDepth
+                      ? coarseIndex
+                      : (rightDistance < rightDepth
+                             ? leftDepth + rightDepth - rightDistance
+                             : leftDepth);
+
+              std::vector<int> signature;
+              signature.reserve(static_cast<size_t>(maxOffset - minOffset + 2));
+              signature.push_back(static_cast<int>(boundaryClass));
+              for (int offset = minOffset; offset <= maxOffset; ++offset) {
+                const LO neighbor = fine + static_cast<LO>(offset);
+                if (neighbor < LO(0) || neighbor >= numFine) {
+                  signature.push_back(0);
+                  signature.push_back(0);
+                } else {
+                  const LO neighborCoarse = constantInterpolationCoarse(
+                      neighbor, numFine, rate);
+                  signature.push_back(1);
+                  signature.push_back(static_cast<int>(neighborCoarse - coarse));
+                }
+              }
+
+              const auto existing = std::find(
+                  signatures.begin(), signatures.end(), signature);
+              size_t classId = 0;
+              if (existing == signatures.end()) {
+                classId = signatures.size();
+                signatures.push_back(std::move(signature));
+                classes.push_back(AxisPlanClass{fine, coarse});
+              } else {
+                classId = static_cast<size_t>(existing - signatures.begin());
+              }
+              classByFine[static_cast<size_t>(fine)] =
+                  static_cast<LO>(classId);
+            }
+          };
+
+          Teuchos::Array<LO> fineXPlanClassHost(
+              static_cast<size_t>(localFineNodes[0]));
+          Teuchos::Array<LO> fineYPlanClassHost(
+              static_cast<size_t>(localFineNodes[1]));
+          std::vector<AxisPlanClass> xPlanClasses;
+          std::vector<AxisPlanClass> yPlanClasses;
+
+          const size_t numDofs = static_cast<size_t>(dofsPerNode);
+          const auto aRowMapHost = Kokkos::create_mirror_view_and_copy(
+              Kokkos::HostSpace(), localA.graph.row_map);
+          const auto aEntriesHost = Kokkos::create_mirror_view_and_copy(
+              Kokkos::HostSpace(), localA.graph.entries);
+          const auto acRowMapHost = Kokkos::create_mirror_view_and_copy(
+              Kokkos::HostSpace(), localAc.graph.row_map);
+          const auto acEntriesHost = Kokkos::create_mirror_view_and_copy(
+              Kokkos::HostSpace(), localAc.graph.entries);
+
+          std::vector<size_t> maxAcEntriesPerDof(numDofs, size_t(0));
+          std::vector<size_t> maxAcRepresentativeRows(
+              numDofs, invalidStencilNodeOrdinal);
+          for (size_t coarseNode = 0; coarseNode < numCoarseNodes;
+               ++coarseNode) {
+            for (size_t rowDof = 0; rowDof < numDofs; ++rowDof) {
+              const size_t row = coarseNode * numDofs + rowDof;
+              const size_t rowEntries =
+                  acRowMapHost(row + size_t(1)) - acRowMapHost(row);
+              if (rowEntries > maxAcEntriesPerDof[rowDof]) {
+                maxAcEntriesPerDof[rowDof] = rowEntries;
+                maxAcRepresentativeRows[rowDof] = row;
+              }
+            }
+          }
+
+          int minAcOffsetX = 0;
+          int maxAcOffsetX = 0;
+          int minAcOffsetY = 0;
+          int maxAcOffsetY = 0;
+          for (size_t rowDof = 0; rowDof < numDofs; ++rowDof) {
+            const size_t row = maxAcRepresentativeRows[rowDof];
+            const size_t sourceNode = row / numDofs;
+            const LO sourceX = static_cast<LO>(
+                sourceNode % static_cast<size_t>(localCoarseNodes[0]));
+            const LO sourceY = static_cast<LO>(
+                sourceNode / static_cast<size_t>(localCoarseNodes[0]));
+            for (size_t acEntry = acRowMapHost(row);
+                 acEntry < acRowMapHost(row + size_t(1)); ++acEntry) {
+              const LO targetNode =
+                  static_cast<LO>(acEntriesHost(acEntry) / dofsPerNode);
+              const LO targetX = targetNode % localCoarseNodes[0];
+              const LO targetY = targetNode / localCoarseNodes[0];
+              minAcOffsetX = std::min(
+                  minAcOffsetX, static_cast<int>(targetX - sourceX));
+              maxAcOffsetX = std::max(
+                  maxAcOffsetX, static_cast<int>(targetX - sourceX));
+              minAcOffsetY = std::min(
+                  minAcOffsetY, static_cast<int>(targetY - sourceY));
+              maxAcOffsetY = std::max(
+                  maxAcOffsetY, static_cast<int>(targetY - sourceY));
+            }
+          }
+          size_t leftAcBoundaryDepth =
+              static_cast<size_t>(std::max(0, -minAcOffsetX));
+          size_t rightAcBoundaryDepth =
+              static_cast<size_t>(std::max(0, maxAcOffsetX));
+          size_t bottomAcBoundaryDepth =
+              static_cast<size_t>(std::max(0, -minAcOffsetY));
+          size_t topAcBoundaryDepth =
+              static_cast<size_t>(std::max(0, maxAcOffsetY));
+          bool hasInteriorAcRowX = true;
+          bool hasInteriorAcRowY = true;
+          for (size_t rowDof = 0; rowDof < numDofs; ++rowDof) {
+            const size_t sourceNode =
+                maxAcRepresentativeRows[rowDof] / numDofs;
+            const size_t sourceX =
+                sourceNode % static_cast<size_t>(localCoarseNodes[0]);
+            const size_t sourceY =
+                sourceNode / static_cast<size_t>(localCoarseNodes[0]);
+            hasInteriorAcRowX =
+                hasInteriorAcRowX &&
+                sourceX >= leftAcBoundaryDepth &&
+                static_cast<size_t>(localCoarseNodes[0]) - sourceX - 1 >=
+                    rightAcBoundaryDepth;
+            hasInteriorAcRowY =
+                hasInteriorAcRowY &&
+                sourceY >= bottomAcBoundaryDepth &&
+                static_cast<size_t>(localCoarseNodes[1]) - sourceY - 1 >=
+                    topAcBoundaryDepth;
+          }
+          if (!hasInteriorAcRowX) {
+            leftAcBoundaryDepth =
+                static_cast<size_t>(localCoarseNodes[0]);
+            rightAcBoundaryDepth = 0;
+          }
+          if (!hasInteriorAcRowY) {
+            bottomAcBoundaryDepth =
+                static_cast<size_t>(localCoarseNodes[1]);
+            topAcBoundaryDepth = 0;
+          }
+
+          buildAxisPlanClasses(
+              localFineNodes[0], localCoarseNodes[0], coarseningRate[0],
+              minStencilOffsetX, maxStencilOffsetX, leftAcBoundaryDepth,
+              rightAcBoundaryDepth, fineXPlanClassHost, xPlanClasses);
+          buildAxisPlanClasses(
+              localFineNodes[1], localCoarseNodes[1], coarseningRate[1],
+              minStencilOffsetY, maxStencilOffsetY, bottomAcBoundaryDepth,
+              topAcBoundaryDepth, fineYPlanClassHost, yPlanClasses);
+          numXPlanClasses = xPlanClasses.size();
+          numYPlanClasses = yPlanClasses.size();
+
+          struct AxisAggregatePlanClass {
+            LO representativeCoarse;
+            LO fineBegin;
+            LO fineEnd;
+          };
+          auto buildAxisAggregatePlanClasses = [&](
+              const LO numFine, const LO numCoarse, const LO rate,
+              const size_t leftDepth, const size_t rightDepth,
+              const Teuchos::Array<LO>& fineClassByCoordinate,
+              Teuchos::Array<LO>& classByCoarse,
+              std::vector<AxisAggregatePlanClass>& classes) {
+            std::vector<std::vector<int>> signatures;
+            for (LO coarse = 0; coarse < numCoarse; ++coarse) {
+              const LO fineBegin =
+                  coarse == 0
+                      ? LO(0)
+                      : coarseAnchor(
+                            coarse - 1, numFine, numCoarse, rate) +
+                            (coarseAnchor(coarse, numFine, numCoarse, rate) -
+                             coarseAnchor(coarse - 1, numFine, numCoarse,
+                                          rate)) /
+                                LO(2) +
+                            1;
+              const LO fineEnd =
+                  coarse + 1 == numCoarse
+                      ? numFine - 1
+                      : coarseAnchor(coarse, numFine, numCoarse, rate) +
+                            (coarseAnchor(coarse + 1, numFine, numCoarse,
+                                          rate) -
+                             coarseAnchor(coarse, numFine, numCoarse, rate)) /
+                                LO(2);
+              const size_t coarseIndex = static_cast<size_t>(coarse);
+              const size_t rightDistance =
+                  static_cast<size_t>(numCoarse - coarse - LO(1));
+              const size_t boundaryClass =
+                  coarseIndex < leftDepth
+                      ? coarseIndex
+                      : (rightDistance < rightDepth
+                             ? leftDepth + rightDepth - rightDistance
+                             : leftDepth);
+
+              std::vector<int> signature;
+              signature.reserve(
+                  static_cast<size_t>(fineEnd - fineBegin + LO(2)));
+              signature.push_back(static_cast<int>(boundaryClass));
+              for (LO fine = fineBegin; fine <= fineEnd; ++fine)
+                signature.push_back(static_cast<int>(
+                    fineClassByCoordinate[static_cast<size_t>(fine)]));
+
+              const auto existing = std::find(
+                  signatures.begin(), signatures.end(), signature);
+              size_t classId = 0;
+              if (existing == signatures.end()) {
+                classId = signatures.size();
+                signatures.push_back(std::move(signature));
+                classes.push_back(
+                    AxisAggregatePlanClass{coarse, fineBegin, fineEnd});
+              } else {
+                classId = static_cast<size_t>(existing - signatures.begin());
+              }
+              classByCoarse[static_cast<size_t>(coarse)] =
+                  static_cast<LO>(classId);
+            }
+          };
+
+          Teuchos::Array<LO> coarseXAggregatePlanClassHost(
+              static_cast<size_t>(localCoarseNodes[0]));
+          Teuchos::Array<LO> coarseYAggregatePlanClassHost(
+              static_cast<size_t>(localCoarseNodes[1]));
+          std::vector<AxisAggregatePlanClass> xAggregatePlanClasses;
+          std::vector<AxisAggregatePlanClass> yAggregatePlanClasses;
+          buildAxisAggregatePlanClasses(
+              localFineNodes[0], localCoarseNodes[0], coarseningRate[0],
+              leftAcBoundaryDepth, rightAcBoundaryDepth,
+              fineXPlanClassHost, coarseXAggregatePlanClassHost,
+              xAggregatePlanClasses);
+          buildAxisAggregatePlanClasses(
+              localFineNodes[1], localCoarseNodes[1], coarseningRate[1],
+              bottomAcBoundaryDepth, topAcBoundaryDepth,
+              fineYPlanClassHost, coarseYAggregatePlanClassHost,
+              yAggregatePlanClasses);
+          numXAggregatePlanClasses = xAggregatePlanClasses.size();
+          numYAggregatePlanClasses = yAggregatePlanClasses.size();
+          size_t maxAggregateFineX = 0;
+          size_t maxAggregateFineY = 0;
+          for (const auto& aggregateClass : xAggregatePlanClasses)
+            maxAggregateFineX = std::max(
+                maxAggregateFineX,
+                static_cast<size_t>(aggregateClass.fineEnd -
+                                    aggregateClass.fineBegin + LO(1)));
+          for (const auto& aggregateClass : yAggregatePlanClasses)
+            maxAggregateFineY = std::max(
+                maxAggregateFineY,
+                static_cast<size_t>(aggregateClass.fineEnd -
+                                    aggregateClass.fineBegin + LO(1)));
+          maxFineNodesPerAggregate = maxAggregateFineX * maxAggregateFineY;
+
+          Teuchos::Array<size_t> detectedEntriesPerRow(
+              static_cast<size_t>(dofsPerNode), size_t(0));
+          for (size_t entry = 0; entry < numFineStencilEntries; ++entry) {
+            const LO rowDof = fineStencil.entries[entry].rowDof;
+            ++detectedEntriesPerRow[static_cast<size_t>(rowDof)];
+          }
+          for (LO rowDof = 0; rowDof < dofsPerNode; ++rowDof)
+            maxAEntriesPerRow = std::max(
+                maxAEntriesPerRow,
+                detectedEntriesPerRow[static_cast<size_t>(rowDof)]);
+          for (const size_t rowEntries : maxAcEntriesPerDof)
+            maxAcEntriesPerRow =
+                std::max(maxAcEntriesPerRow, rowEntries);
+
+          coarseXAggregatePlanClass = lo_view(
+              "StructuredRAP: coarse-X aggregate plan class",
+              static_cast<size_t>(localCoarseNodes[0]));
+          coarseYAggregatePlanClass = lo_view(
+              "StructuredRAP: coarse-Y aggregate plan class",
+              static_cast<size_t>(localCoarseNodes[1]));
+          auto coarseXAggregatePlanClassHostView =
+              Kokkos::create_mirror_view(coarseXAggregatePlanClass);
+          auto coarseYAggregatePlanClassHostView =
+              Kokkos::create_mirror_view(coarseYAggregatePlanClass);
+          for (size_t coarseX = 0;
+               coarseX < static_cast<size_t>(localCoarseNodes[0]);
+               ++coarseX)
+            coarseXAggregatePlanClassHostView(coarseX) =
+                coarseXAggregatePlanClassHost[coarseX];
+          for (size_t coarseY = 0;
+               coarseY < static_cast<size_t>(localCoarseNodes[1]);
+               ++coarseY)
+            coarseYAggregatePlanClassHostView(coarseY) =
+                coarseYAggregatePlanClassHost[coarseY];
+          Kokkos::deep_copy(executionSpace, coarseXAggregatePlanClass,
+                            coarseXAggregatePlanClassHostView);
+          Kokkos::deep_copy(executionSpace, coarseYAggregatePlanClass,
+                            coarseYAggregatePlanClassHostView);
+
+          const size_t planSize = numXPlanClasses * numYPlanClasses *
+                                  numDofs * maxAEntriesPerRow;
+          const size_t planRowCount =
+              numXPlanClasses * numYPlanClasses * numDofs;
+          Teuchos::Array<size_t> plannedAcOffsetsHost(
+              planSize, invalidStencilNodeOrdinal);
+          Teuchos::Array<size_t> plannedARowLengthsHost(
+              planRowCount, size_t(0));
+
+          for (size_t yClass = 0; yClass < numYPlanClasses; ++yClass) {
+            const LO fineY = yPlanClasses[yClass].representativeFine;
+            const LO coarseY = yPlanClasses[yClass].representativeCoarse;
+            for (size_t xClass = 0; xClass < numXPlanClasses; ++xClass) {
+              const LO fineX = xPlanClasses[xClass].representativeFine;
+              const LO coarseX = xPlanClasses[xClass].representativeCoarse;
+              const size_t fineNode =
+                  static_cast<size_t>(fineY) *
+                      static_cast<size_t>(localFineNodes[0]) +
+                  static_cast<size_t>(fineX);
+              const size_t coarseNode =
+                  static_cast<size_t>(coarseY) *
+                      static_cast<size_t>(localCoarseNodes[0]) +
+                  static_cast<size_t>(coarseX);
+
+              for (LO rowDof = 0; rowDof < dofsPerNode; ++rowDof) {
+                const size_t fineRow =
+                    fineNode * numDofs + static_cast<size_t>(rowDof);
+                const size_t aRowBegin = aRowMapHost(fineRow);
+                const size_t aRowEnd = aRowMapHost(fineRow + size_t(1));
+                const size_t acRow =
+                    coarseNode * numDofs + static_cast<size_t>(rowDof);
+                const size_t acRowBegin = acRowMapHost(acRow);
+                const size_t acRowEnd = acRowMapHost(acRow + size_t(1));
+                const size_t planRowIndex =
+                    (yClass * numXPlanClasses + xClass) * numDofs +
+                    static_cast<size_t>(rowDof);
+                const size_t planRowBegin =
+                    planRowIndex * maxAEntriesPerRow;
+
+                plannedARowLengthsHost[planRowIndex] =
+                    aRowEnd - aRowBegin;
+
+                for (size_t entryOrdinal = 0;
+                     entryOrdinal < aRowEnd - aRowBegin; ++entryOrdinal) {
+                  const LO column = aEntriesHost(aRowBegin + entryOrdinal);
+                  const LO columnNode = column / dofsPerNode;
+                  const LO columnDof = column % dofsPerNode;
+                  const LO columnX = columnNode % localFineNodes[0];
+                  const LO columnY = columnNode / localFineNodes[0];
+                  const LO targetCoarseX = constantInterpolationCoarse(
+                      columnX, localFineNodes[0], coarseningRate[0]);
+                  const LO targetCoarseY = constantInterpolationCoarse(
+                      columnY, localFineNodes[1], coarseningRate[1]);
+                  const size_t targetCoarseNode =
+                      static_cast<size_t>(targetCoarseY) *
+                          static_cast<size_t>(localCoarseNodes[0]) +
+                      static_cast<size_t>(targetCoarseX);
+                  const size_t targetColumn =
+                      targetCoarseNode * numDofs +
+                      static_cast<size_t>(columnDof);
+                  for (size_t acEntry = acRowBegin; acEntry < acRowEnd;
+                       ++acEntry) {
+                    if (static_cast<size_t>(acEntriesHost(acEntry)) ==
+                        targetColumn) {
+                                            plannedAcOffsetsHost[planRowBegin + entryOrdinal] =
+                          acEntry - acRowBegin;
+                      break;
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          struct ReverseContribution {
+            size_t fineNodeOffset;
+            size_t entryOrdinal;
+          };
+          const size_t reversePlanRowCount =
+              numXAggregatePlanClasses * numYAggregatePlanClasses * numDofs;
+          const size_t reverseBucketCount =
+              reversePlanRowCount * maxAcEntriesPerRow;
+          std::vector<std::vector<ReverseContribution>> reverseBuckets(
+              reverseBucketCount);
+          for (size_t yClass = 0;
+               yClass < numYAggregatePlanClasses; ++yClass) {
+            const auto& yAggregate = yAggregatePlanClasses[yClass];
+            const size_t fineYBegin =
+                static_cast<size_t>(yAggregate.fineBegin);
+            const size_t fineYEnd =
+                static_cast<size_t>(yAggregate.fineEnd);
+            for (size_t xClass = 0;
+                 xClass < numXAggregatePlanClasses; ++xClass) {
+              const auto& xAggregate = xAggregatePlanClasses[xClass];
+              const size_t fineXBegin =
+                  static_cast<size_t>(xAggregate.fineBegin);
+              const size_t fineXEnd =
+                  static_cast<size_t>(xAggregate.fineEnd);
+              const size_t aggregateWidth = fineXEnd - fineXBegin + 1;
+              for (size_t rowDof = 0; rowDof < numDofs; ++rowDof) {
+                const size_t reverseRow =
+                    (yClass * numXAggregatePlanClasses + xClass) *
+                        numDofs +
+                    rowDof;
+
+                for (size_t fineY = fineYBegin; fineY <= fineYEnd; ++fineY) {
+                  const size_t sourceYClass = static_cast<size_t>(
+                      fineYPlanClassHost[ fineY ]);
+                  for (size_t fineX = fineXBegin; fineX <= fineXEnd;
+                       ++fineX) {
+                    const size_t sourceXClass = static_cast<size_t>(
+                        fineXPlanClassHost[ fineX ]);
+                    const size_t sourcePlanRow =
+                        (sourceYClass * numXPlanClasses + sourceXClass) *
+                            numDofs +
+                        rowDof;
+                    const size_t localFineNodeOffset =
+                        (fineY - fineYBegin) * aggregateWidth +
+                        fineX - fineXBegin;
+                    const size_t sourcePlanBegin =
+                        sourcePlanRow * maxAEntriesPerRow;
+                    const size_t sourceRowLength =
+                        plannedARowLengthsHost[sourcePlanRow];
+                    for (size_t entryOrdinal = 0;
+                         entryOrdinal < sourceRowLength; ++entryOrdinal) {
+                      const size_t acOffset = plannedAcOffsetsHost[
+                          sourcePlanBegin + entryOrdinal];
+                      if (acOffset == invalidStencilNodeOrdinal)
+                        continue;
+                      const size_t bucket =
+                          reverseRow * maxAcEntriesPerRow + acOffset;
+                      reverseBuckets[bucket].push_back(
+                          ReverseContribution{localFineNodeOffset,
+                                              entryOrdinal});
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          size_t numReverseContributions = 0;
+          for (const auto& bucket : reverseBuckets)
+            numReverseContributions += bucket.size();
+          reverseContributionBegins = size_view(
+              Kokkos::ViewAllocateWithoutInitializing(
+                  "StructuredRAP: reverse contribution begins"),
+              reverseBucketCount);
+          reverseContributionCounts = size_view(
+              Kokkos::ViewAllocateWithoutInitializing(
+                  "StructuredRAP: reverse contribution counts"),
+              reverseBucketCount);
+          reverseFineNodeOffsets = size_view(
+              Kokkos::ViewAllocateWithoutInitializing(
+                  "StructuredRAP: reverse fine-node offsets"),
+              numReverseContributions);
+          reverseAEntryOrdinals = size_view(
+              Kokkos::ViewAllocateWithoutInitializing(
+                  "StructuredRAP: reverse A entry ordinals"),
+              numReverseContributions);
+          auto reverseContributionBeginsHost =
+              Kokkos::create_mirror_view(reverseContributionBegins);
+          auto reverseContributionCountsHost =
+              Kokkos::create_mirror_view(reverseContributionCounts);
+          auto reverseFineNodeOffsetsHost =
+              Kokkos::create_mirror_view(reverseFineNodeOffsets);
+          auto reverseAEntryOrdinalsHost =
+              Kokkos::create_mirror_view(reverseAEntryOrdinals);
+          size_t reverseContribution = 0;
+          for (size_t bucket = 0; bucket < reverseBucketCount; ++bucket) {
+            reverseContributionBeginsHost(bucket) = reverseContribution;
+            reverseContributionCountsHost(bucket) =
+                reverseBuckets[bucket].size();
+            for (const auto& source : reverseBuckets[bucket]) {
+              reverseFineNodeOffsetsHost(reverseContribution) =
+                  source.fineNodeOffset;
+              reverseAEntryOrdinalsHost(reverseContribution) =
+                  source.entryOrdinal;
+              ++reverseContribution;
+            }
+          }
+          Kokkos::deep_copy(executionSpace, reverseContributionBegins,
+                            reverseContributionBeginsHost);
+          Kokkos::deep_copy(executionSpace, reverseContributionCounts,
+                            reverseContributionCountsHost);
+          Kokkos::deep_copy(executionSpace, reverseFineNodeOffsets,
+                            reverseFineNodeOffsetsHost);
+          Kokkos::deep_copy(executionSpace, reverseAEntryOrdinals,
+                            reverseAEntryOrdinalsHost);
+
+          executionSpace.fence("StructuredRAP: numeric entry plan prepared");
         }
+
+        const size_t numCoarseNodeTiles =
+            (numCoarseNodes + coarseNodesPerTile - size_t(1)) /
+            coarseNodesPerTile;
+        fineARowBegins = size_view(
+            Kokkos::ViewAllocateWithoutInitializing(
+                "StructuredRAP: tile-local fine A row begins"),
+            numCoarseNodeTiles * maxFineNodesPerAggregate * numScalarDofs);
 
         {
           Teuchos::TimeMonitor timer(
               *Teuchos::TimeMonitor::getNewTimer(
                   timerPrefix +
                   "numeric (Elasticity2D constant stencil)"));
+          range_policy policy(executionSpace, 0, numCoarseNodeTiles);
           Kokkos::parallel_for(
               "StructuredRAP: Elasticity2D constant stencil P^T A P",
-              range_policy(executionSpace, 0, numWorkers),
-              KOKKOS_LAMBDA(const size_t worker) {
+              policy,
+              KOKKOS_LAMBDA(const size_t tileIndex) {
                 const size_t firstCoarseNode =
-                    worker * numCoarseNodes / numWorkers;
-                const size_t lastCoarseNode =
-                    (worker + 1) * numCoarseNodes / numWorkers;
-
+                    tileIndex * coarseNodesPerTile;
+                const size_t lastCoarseNode = Kokkos::min(
+                    numCoarseNodes, firstCoarseNode + coarseNodesPerTile);
+                const size_t tileFineRowsBegin =
+                    tileIndex * maxFineNodesPerAggregate * numScalarDofs;
                 for (size_t coarseNodeIndex = firstCoarseNode;
                      coarseNodeIndex < lastCoarseNode;
                      ++coarseNodeIndex) {
-                  const LO coarseNode =
-                      static_cast<LO>(coarseNodeIndex);
-                  const size_t firstCoarseRow = coarseNodeIndex * size_t(2);
-                  const size_t acBegin0 =
-                      localAc.graph.row_map(firstCoarseRow);
-                  const size_t acEnd1 =
-                      localAc.graph.row_map(firstCoarseRow + 2);
-                  for (size_t acEntry = acBegin0;
-                       acEntry < acEnd1; ++acEntry) {
-                    localAc.values(acEntry) = zero;
-                  }
+                const LO coarseNode = static_cast<LO>(coarseNodeIndex);
+                const LO coarseX = coarseNode % localCoarseNodes[0];
+                const LO coarseY = coarseNode / localCoarseNodes[0];
+                const size_t firstCoarseRow =
+                    coarseNodeIndex * numScalarDofs;
 
-                  const LO coarseX =
-                      coarseNode % localCoarseNodes[0];
-                  const LO coarseY =
-                      coarseNode / localCoarseNodes[0];
-                  const LO fineXBegin =
-                      coarseX == 0
-                          ? LO(0)
-                          : coarseAnchor(
-                                coarseX - 1, localFineNodes[0],
-                                localCoarseNodes[0], coarseningRate[0]) +
-                                (coarseAnchor(
-                                     coarseX, localFineNodes[0],
-                                     localCoarseNodes[0], coarseningRate[0]) -
-                                 coarseAnchor(
-                                     coarseX - 1, localFineNodes[0],
-                                     localCoarseNodes[0], coarseningRate[0])) /
-                                    LO(2) +
-                                1;
-                  const LO fineXEnd =
-                      coarseX + 1 == localCoarseNodes[0]
-                          ? localFineNodes[0] - 1
-                          : coarseAnchor(
-                                coarseX, localFineNodes[0],
-                                localCoarseNodes[0], coarseningRate[0]) +
-                                (coarseAnchor(
-                                     coarseX + 1, localFineNodes[0],
-                                     localCoarseNodes[0], coarseningRate[0]) -
-                                 coarseAnchor(
-                                     coarseX, localFineNodes[0],
-                                     localCoarseNodes[0], coarseningRate[0])) /
-                                    LO(2);
-                  const LO fineYBegin =
-                      coarseY == 0
-                          ? LO(0)
-                          : coarseAnchor(
-                                coarseY - 1, localFineNodes[1],
-                                localCoarseNodes[1], coarseningRate[1]) +
-                                (coarseAnchor(
-                                     coarseY, localFineNodes[1],
-                                     localCoarseNodes[1], coarseningRate[1]) -
-                                 coarseAnchor(
-                                     coarseY - 1, localFineNodes[1],
-                                     localCoarseNodes[1], coarseningRate[1])) /
-                                    LO(2) +
-                                1;
-                  const LO fineYEnd =
-                      coarseY + 1 == localCoarseNodes[1]
-                          ? localFineNodes[1] - 1
-                          : coarseAnchor(
-                                coarseY, localFineNodes[1],
-                                localCoarseNodes[1], coarseningRate[1]) +
-                                (coarseAnchor(
-                                     coarseY + 1, localFineNodes[1],
-                                     localCoarseNodes[1], coarseningRate[1]) -
-                                 coarseAnchor(
-                                     coarseY, localFineNodes[1],
-                                     localCoarseNodes[1], coarseningRate[1])) /
-                                    LO(2);
+                const LO fineXBegin =
+                    coarseX == 0
+                        ? LO(0)
+                        : coarseAnchor(
+                              coarseX - 1, localFineNodes[0],
+                              localCoarseNodes[0], coarseningRate[0]) +
+                              (coarseAnchor(
+                                   coarseX, localFineNodes[0],
+                                   localCoarseNodes[0], coarseningRate[0]) -
+                               coarseAnchor(
+                                   coarseX - 1, localFineNodes[0],
+                                   localCoarseNodes[0], coarseningRate[0])) /
+                                  LO(2) +
+                              1;
+                const LO fineXEnd =
+                    coarseX + 1 == localCoarseNodes[0]
+                        ? localFineNodes[0] - 1
+                        : coarseAnchor(
+                              coarseX, localFineNodes[0],
+                              localCoarseNodes[0], coarseningRate[0]) +
+                              (coarseAnchor(
+                                   coarseX + 1, localFineNodes[0],
+                                   localCoarseNodes[0], coarseningRate[0]) -
+                               coarseAnchor(
+                                   coarseX, localFineNodes[0],
+                                   localCoarseNodes[0], coarseningRate[0])) /
+                                  LO(2);
+                const LO fineYBegin =
+                    coarseY == 0
+                        ? LO(0)
+                        : coarseAnchor(
+                              coarseY - 1, localFineNodes[1],
+                              localCoarseNodes[1], coarseningRate[1]) +
+                              (coarseAnchor(
+                                   coarseY, localFineNodes[1],
+                                   localCoarseNodes[1], coarseningRate[1]) -
+                               coarseAnchor(
+                                   coarseY - 1, localFineNodes[1],
+                                   localCoarseNodes[1], coarseningRate[1])) /
+                                  LO(2) +
+                              1;
+                const LO fineYEnd =
+                    coarseY + 1 == localCoarseNodes[1]
+                        ? localFineNodes[1] - 1
+                        : coarseAnchor(
+                              coarseY, localFineNodes[1],
+                              localCoarseNodes[1], coarseningRate[1]) +
+                              (coarseAnchor(
+                                   coarseY + 1, localFineNodes[1],
+                                   localCoarseNodes[1], coarseningRate[1]) -
+                               coarseAnchor(
+                                   coarseY, localFineNodes[1],
+                                   localCoarseNodes[1], coarseningRate[1])) /
+                                  LO(2);
 
-                  const LO firstStencilX = coarseX == 0 ? LO(0) : coarseX - 1;
-                  const LO firstStencilY = coarseY == 0 ? LO(0) : coarseY - 1;
-                  const LO lastStencilX =
-                      coarseX + 1 < localCoarseNodes[0] ? coarseX + 1 : coarseX;
-                  const LO stencilWidth = lastStencilX - firstStencilX + 1;
+                const size_t aggregateWidth =
+                    static_cast<size_t>(fineXEnd - fineXBegin + LO(1));
+                const size_t aggregateXClass =
+                    static_cast<size_t>(coarseXAggregatePlanClass(
+                        static_cast<size_t>(coarseX)));
+                const size_t aggregateYClass =
+                    static_cast<size_t>(coarseYAggregatePlanClass(
+                        static_cast<size_t>(coarseY)));
+                const size_t reversePlanNodeBegin =
+                    (aggregateYClass * numXAggregatePlanClasses +
+                     aggregateXClass) * numScalarDofs;
 
-                  for (LO fineY = fineYBegin; fineY <= fineYEnd;
-                       ++fineY) {
-                    for (LO fineX = fineXBegin; fineX <= fineXEnd;
-                         ++fineX) {
-                      const LO fineNode =
-                          fineY * localFineNodes[0] + fineX;
-                      const LO firstFineRow = fineNode * dofsPerNode;
-                      const bool interior =
-                          fineX > 0 && fineX + 1 < localFineNodes[0] &&
-                          fineY > 0 && fineY + 1 < localFineNodes[1];
-
-                      for (size_t stencilEntry = 0;
-                           stencilEntry < numFineStencilEntries;
-                           ++stencilEntry) {
-                        const LO neighborX =
-                            fineX + static_cast<LO>(stencilOffsetX(stencilEntry));
-                        const LO neighborY =
-                            fineY + static_cast<LO>(stencilOffsetY(stencilEntry));
-                        if (neighborX < LO(0) || neighborX >= localFineNodes[0] ||
-                            neighborY < LO(0) || neighborY >= localFineNodes[1])
-                          continue;
-
-                        const LO rowDof = stencilRowDof(stencilEntry);
-                        const LO columnDof = stencilColumnDof(stencilEntry);
-                        const LO targetX = fineXToCoarseX(
-                            static_cast<size_t>(neighborX));
-                        const LO targetY = fineYToCoarseY(
-                            static_cast<size_t>(neighborY));
-                        const size_t coarseNodeOffset = static_cast<size_t>(
-                            (targetY - firstStencilY) * stencilWidth +
-                            (targetX - firstStencilX)) * size_t(2);
-                        const size_t acRowBegin =
-                            localAc.graph.row_map(firstCoarseRow +
-                                                  static_cast<size_t>(rowDof));
-                        const size_t acEntry =
-                            acRowBegin + coarseNodeOffset +
-                            static_cast<size_t>(columnDof);
-
-                        const size_t aRow =
-                            static_cast<size_t>(firstFineRow + rowDof);
-                        const size_t aRowBegin =
-                            localA.graph.row_map(aRow);
-                        size_t aEntry =
-                            aRowBegin +
-                            static_cast<size_t>(stencilEntryOrdinal(stencilEntry));
-
-                        if (!interior) {
-                          const LO neighborNode =
-                              neighborY * localFineNodes[0] + neighborX;
-                          const LO expectedColumn =
-                              neighborNode * dofsPerNode + columnDof;
-                          const size_t aRowEnd =
-                              localA.graph.row_map(aRow + size_t(1));
-                          aEntry = aRowEnd;
-                          for (size_t candidate = aRowBegin;
-                               candidate < aRowEnd; ++candidate) {
-                            if (localA.graph.entries(candidate) == expectedColumn) {
-                              aEntry = candidate;
-                              break;
-                            }
-                          }
-                          if (aEntry == aRowEnd)
-                            continue;
-                        }
-
-                        localAc.values(acEntry) += localA.values(aEntry);
-                      }
+                for (LO fineY = fineYBegin; fineY <= fineYEnd; ++fineY) {
+                  for (LO fineX = fineXBegin; fineX <= fineXEnd; ++fineX) {
+                    const size_t fineNode =
+                        static_cast<size_t>(fineY) *
+                            static_cast<size_t>(localFineNodes[0]) +
+                        static_cast<size_t>(fineX);
+                    const size_t localFineNodeOffset =
+                        static_cast<size_t>(fineY - fineYBegin) *
+                            aggregateWidth +
+                        static_cast<size_t>(fineX - fineXBegin);
+                    for (size_t rowDof = 0; rowDof < numScalarDofs;
+                         ++rowDof) {
+                      const size_t localFineRow =
+                          localFineNodeOffset * numScalarDofs + rowDof;
+                      const size_t aRow =
+                          fineNode * numScalarDofs + rowDof;
+                      fineARowBegins(tileFineRowsBegin + localFineRow) =
+                          localA.graph.row_map(aRow);
                     }
                   }
+                }
+
+                for (size_t rowDof = 0; rowDof < numScalarDofs; ++rowDof) {
+                      const size_t acRow = firstCoarseRow + rowDof;
+                      const size_t acRowBegin =
+                          localAc.graph.row_map(acRow);
+                      const size_t acRowEnd =
+                          localAc.graph.row_map(acRow + size_t(1));
+                      const size_t reversePlanRow =
+                          reversePlanNodeBegin + rowDof;
+                      for (size_t acOffset = 0;
+                           acOffset < acRowEnd - acRowBegin; ++acOffset) {
+                        const size_t bucket =
+                            reversePlanRow * maxAcEntriesPerRow + acOffset;
+                        const size_t contributionBegin =
+                            reverseContributionBegins(bucket);
+                        const size_t contributionEnd =
+                            contributionBegin +
+                            reverseContributionCounts(bucket);
+                        SC sum = zero;
+                        for (size_t contribution = contributionBegin;
+                             contribution < contributionEnd; ++contribution) {
+                          const size_t localFineNodeOffset =
+                              reverseFineNodeOffsets(contribution);
+                          const size_t entryOrdinal =
+                              reverseAEntryOrdinals(contribution);
+                          const size_t localFineRow =
+                              localFineNodeOffset * numScalarDofs + rowDof;
+                          sum += localA.values(
+                              fineARowBegins(tileFineRowsBegin +
+                                             localFineRow) +
+                              entryOrdinal);
+                        }
+                        localAc.values(acRowBegin + acOffset) = sum;
+                      }
+                    }
                 }
               });
           executionSpace.fence(
@@ -453,13 +851,9 @@ class StructuredRAPKernel {
         }
         return;
       }
-    }
 
-    TEUCHOS_TEST_FOR_EXCEPTION(
-        true, std::runtime_error,
-        prefix << "only the serial host two-dimensional, two-DOF, order-zero "
-                  "nine-point specialization is currently implemented; no generic "
-                  "triple-matrix-product fallback is available.");
+    throw std::runtime_error(
+        "StructuredRAPKernel supports only single-rank 2D order-zero structured RAP.");
   }
 };
 

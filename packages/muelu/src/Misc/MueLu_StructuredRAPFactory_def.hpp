@@ -117,6 +117,7 @@ StructuredRAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::StructuredRAPFa
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 RCP<const ParameterList> StructuredRAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::GetValidParameterList() const {
   RCP<ParameterList> validParamList = rcp(new ParameterList());
+  // If no triple product is prescribed, use Xpetra implementation by default
   validParamList->set<std::string>(
       "rap: triple product implementation", "xpetra",
       "Implementation used with a prebuilt coarse graph: xpetra or structured.");
@@ -134,9 +135,9 @@ RCP<const ParameterList> StructuredRAPFactory<Scalar, LocalOrdinal, GlobalOrdina
       "Use P^T as the restriction operator. StructuredRAPFactory requires this option to be true.");
   validParamList->set<RCP<const FactoryBase>>("A", null, "Generating factory of the matrix A used during the prolongator smoothing process");
   validParamList->set<RCP<const FactoryBase>>("P", null, "Prolongator factory");
-  validParamList->set<RCP<const FactoryBase>>("lNodesPerDim", null, "Number of nodes per spatial dimension on the fine grid.");
-  validParamList->set<RCP<const FactoryBase>>("lCoarseNodesPerDim", null, "Number of nodes per spatial dimension on the coarse grid.");
   validParamList->set<RCP<const FactoryBase>>("numDimensions", null, "Number of spatial dimensions.");
+  validParamList->set<RCP<const FactoryBase>>("lNodesPerDim", null, "Local number of fine-grid nodes per spatial dimension.");
+  validParamList->set<RCP<const FactoryBase>>("lCoarseNodesPerDim", null, "Local number of coarse-grid nodes per spatial dimension.");
   validParamList->set<RCP<const FactoryBase>>("structuredInterpolationOrder", null, "Interpolation order used to construct the structured prolongator.");
 
   validParamList->set<bool>("CheckMainDiagonal", false, "Check main diagonal for zeros");
