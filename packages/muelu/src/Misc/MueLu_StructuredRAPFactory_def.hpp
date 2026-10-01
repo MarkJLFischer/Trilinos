@@ -29,6 +29,7 @@
 #include "MueLu_MasterList.hpp"
 #include "MueLu_NoFactory.hpp"
 #include "MueLu_Monitor.hpp"
+#include "MueLu_TimeMonitor.hpp"
 #include "MueLu_PerfUtils.hpp"
 #include "MueLu_Behavior.hpp"
 #include "MueLu_RAPFactory_def.hpp"
@@ -117,6 +118,7 @@ StructuredRAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::StructuredRAPFa
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 RCP<const ParameterList> StructuredRAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::GetValidParameterList() const {
   RCP<ParameterList> validParamList = rcp(new ParameterList());
+  // If no triple product is prescribed, use Xpetra implementation by default
   validParamList->set<std::string>(
       "rap: triple product implementation", "xpetra",
       "Implementation used with a prebuilt coarse graph: xpetra or structured.");
@@ -134,9 +136,9 @@ RCP<const ParameterList> StructuredRAPFactory<Scalar, LocalOrdinal, GlobalOrdina
       "Use P^T as the restriction operator. StructuredRAPFactory requires this option to be true.");
   validParamList->set<RCP<const FactoryBase>>("A", null, "Generating factory of the matrix A used during the prolongator smoothing process");
   validParamList->set<RCP<const FactoryBase>>("P", null, "Prolongator factory");
-  validParamList->set<RCP<const FactoryBase>>("lNodesPerDim", null, "Number of nodes per spatial dimension on the fine grid.");
-  validParamList->set<RCP<const FactoryBase>>("lCoarseNodesPerDim", null, "Number of nodes per spatial dimension on the coarse grid.");
   validParamList->set<RCP<const FactoryBase>>("numDimensions", null, "Number of spatial dimensions.");
+  validParamList->set<RCP<const FactoryBase>>("lNodesPerDim", null, "Local number of fine-grid nodes per spatial dimension.");
+  validParamList->set<RCP<const FactoryBase>>("lCoarseNodesPerDim", null, "Local number of coarse-grid nodes per spatial dimension.");
   validParamList->set<RCP<const FactoryBase>>("structuredInterpolationOrder", null, "Interpolation order used to construct the structured prolongator.");
 
   validParamList->set<bool>("CheckMainDiagonal", false, "Check main diagonal for zeros");
@@ -1113,11 +1115,12 @@ void StructuredRAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Leve
   }
 
   {
+    const std::string labelstr = FormattingHelper::getColonLabel(coarseLevel.getObjectLabel());
+    TimeMonitor allLevelsMonitor(*this, labelstr + ShortClassName() + ": Computing Ac (total)");
     FactoryMonitor m(*this, "Computing Ac", coarseLevel);
 
     std::ostringstream levelstr;
     levelstr << coarseLevel.GetLevelID();
-    std::string labelstr = FormattingHelper::getColonLabel(coarseLevel.getObjectLabel());
 
     TEUCHOS_TEST_FOR_EXCEPTION(
         pL.get<bool>("rap: triple product") == false, Exceptions::RuntimeError,
@@ -1206,6 +1209,8 @@ void StructuredRAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Leve
     {
       RCP<ParameterList> RAPparams;
       {
+        TimeMonitor allLevelsGraphMonitor(
+            *this, labelstr + ShortClassName() + ": Prebuilding coarse Ac graph (sub, total)");
         SubFactoryMonitor mGraph(*this, "Prebuilding coarse Ac graph", coarseLevel);
 
         A = Get<RCP<Matrix>>(fineLevel, "A");
@@ -1256,11 +1261,22 @@ void StructuredRAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Leve
                         doOptimizeStorage, labelstr + std::string("MueLu::Xpetra-P^T*A*P-implicit-") + levelstr.str(),
                         RAPparams);
       } else {
+        TimeMonitor allLevelsStructuredMxMxMMonitor(
+            *this, labelstr + ShortClassName() + ": MxMxM: Structured P^T x A x P (implicit) (sub, total)");
         SubFactoryMonitor m2(*this, "MxMxM: Structured P^T x A x P (implicit)", coarseLevel);
         Details::StructuredRAPKernel<SC, LO, GO, NO>::Compute(
             *A, *P, *Ac, fineStencil, interpolationOrder,
             lFineNodesPerDim, lCoarseNodesPerDim,
             structuredCoarseningRate, RAPparams);
+
+        // StructuredRAPKernel computes the entries of Ac directly, so it does
+        // not pass through Xpetra::TripleMatrixMultiply, which normally
+        // propagates the strided maps from the transfer operators.  Preserve
+        // that metadata here so factories on the next level see the correct
+        // number of degrees of freedom per node.  Using P for both factors
+        // mirrors the P^T A P striding transfer in MultiplyRAP and retains
+        // general striding information (including block IDs and offsets).
+        Ac->CreateView("stridedMaps", P, true, P, false);
       }
 
       {
