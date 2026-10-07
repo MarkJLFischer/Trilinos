@@ -29,7 +29,6 @@
 #include "MueLu_MasterList.hpp"
 #include "MueLu_NoFactory.hpp"
 #include "MueLu_Monitor.hpp"
-#include "MueLu_TimeMonitor.hpp"
 #include "MueLu_PerfUtils.hpp"
 #include "MueLu_Behavior.hpp"
 #include "MueLu_RAPFactory_def.hpp"
@@ -1116,7 +1115,6 @@ void StructuredRAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Leve
 
   {
     const std::string labelstr = FormattingHelper::getColonLabel(coarseLevel.getObjectLabel());
-    TimeMonitor allLevelsMonitor(*this, labelstr + ShortClassName() + ": Computing Ac (total)");
     FactoryMonitor m(*this, "Computing Ac", coarseLevel);
 
     std::ostringstream levelstr;
@@ -1209,8 +1207,6 @@ void StructuredRAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Leve
     {
       RCP<ParameterList> RAPparams;
       {
-        TimeMonitor allLevelsGraphMonitor(
-            *this, labelstr + ShortClassName() + ": Prebuilding coarse Ac graph (sub, total)");
         SubFactoryMonitor mGraph(*this, "Prebuilding coarse Ac graph", coarseLevel);
 
         A = Get<RCP<Matrix>>(fineLevel, "A");
@@ -1261,8 +1257,6 @@ void StructuredRAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Leve
                         doOptimizeStorage, labelstr + std::string("MueLu::Xpetra-P^T*A*P-implicit-") + levelstr.str(),
                         RAPparams);
       } else {
-        TimeMonitor allLevelsStructuredMxMxMMonitor(
-            *this, labelstr + ShortClassName() + ": MxMxM: Structured P^T x A x P (implicit) (sub, total)");
         SubFactoryMonitor m2(*this, "MxMxM: Structured P^T x A x P (implicit)", coarseLevel);
         Details::StructuredRAPKernel<SC, LO, GO, NO>::Compute(
             *A, *P, *Ac, fineStencil, interpolationOrder,
