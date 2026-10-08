@@ -15,6 +15,7 @@
 #include <array>
 #include <sstream>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "MueLu_config.hpp"
@@ -117,6 +118,14 @@ buildStructuredProblem(const std::string& matrixType,
   } else if (matrixType == "Elasticity3D") {
     problem.dofsPerNode = 3;
     map                 = Xpetra::MapFactory<LO, GO, NO>::Build(map, problem.dofsPerNode);
+  }
+
+  if (matrixType == "Elasticity2D" || matrixType == "Elasticity3D") {
+    galeriList.set("right boundary", "Neumann");
+    galeriList.set("bottom boundary", "Neumann");
+    galeriList.set("top boundary", "Neumann");
+    galeriList.set("front boundary", "Neumann");
+    galeriList.set("back boundary", "Neumann");
   }
 
   Teuchos::RCP<Galeri::Xpetra::Problem<Map, CrsMatrixWrap, MultiVector> > galeriProblem =
@@ -334,6 +343,7 @@ buildCoarseMatrix(const StructuredProblemData<Scalar, LocalOrdinal, GlobalOrdina
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 void compareRAPMatrices(const Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, GlobalOrdinal, Node> >& structuredAc,
                         const Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, GlobalOrdinal, Node> >& referenceAc,
+                        const LocalOrdinal dofsPerNode,
                         Teuchos::FancyOStream& out) {
   using SC        = Scalar;
   using LO        = LocalOrdinal;
@@ -462,6 +472,101 @@ void compareRAPMatrices(const Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, 
       std::runtime_error,
       graphMismatchDetails);
 
+  real_type localMaxEntryError = Teuchos::ScalarTraits<real_type>::zero();
+  real_type localRelativeError = Teuchos::ScalarTraits<real_type>::zero();
+  GO localMismatchRow          = structuredRowMap->getIndexBase();
+  GO localMismatchColumn       = structuredRowMap->getIndexBase();
+  SC localStructuredValue      = TST::zero();
+  SC localReferenceValue       = TST::zero();
+  for (size_t row = 0; row < localNumRows; ++row) {
+    const LO rowLid = Teuchos::as<LO>(row);
+    Teuchos::ArrayView<const LO> structuredIndices;
+    Teuchos::ArrayView<const SC> structuredValues;
+    Teuchos::ArrayView<const LO> referenceIndices;
+    Teuchos::ArrayView<const SC> referenceValues;
+    structuredAc->getLocalRowView(rowLid, structuredIndices, structuredValues);
+    referenceAc->getLocalRowView(rowLid, referenceIndices, referenceValues);
+
+    std::vector<std::pair<GO, SC> > structuredEntries, referenceEntries;
+    structuredEntries.reserve(structuredIndices.size());
+    referenceEntries.reserve(referenceIndices.size());
+    for (int entry = 0; entry < structuredIndices.size(); ++entry)
+      structuredEntries.emplace_back(
+          structuredColMap->getGlobalElement(structuredIndices[entry]),
+          structuredValues[entry]);
+    for (int entry = 0; entry < referenceIndices.size(); ++entry)
+      referenceEntries.emplace_back(
+          referenceColMap->getGlobalElement(referenceIndices[entry]),
+          referenceValues[entry]);
+    const auto compareGid = [](const std::pair<GO, SC>& left,
+                               const std::pair<GO, SC>& right) {
+      return left.first < right.first;
+    };
+    std::sort(structuredEntries.begin(), structuredEntries.end(), compareGid);
+    std::sort(referenceEntries.begin(), referenceEntries.end(), compareGid);
+
+    size_t structuredEntry = 0, referenceEntry = 0;
+    while (structuredEntry < structuredEntries.size() ||
+           referenceEntry < referenceEntries.size()) {
+      GO columnGid;
+      SC structuredValue = TST::zero(), referenceValue = TST::zero();
+      if (referenceEntry == referenceEntries.size() ||
+          (structuredEntry < structuredEntries.size() &&
+           structuredEntries[structuredEntry].first < referenceEntries[referenceEntry].first)) {
+        columnGid      = structuredEntries[structuredEntry].first;
+        structuredValue = structuredEntries[structuredEntry++].second;
+      } else if (structuredEntry == structuredEntries.size() ||
+                 referenceEntries[referenceEntry].first < structuredEntries[structuredEntry].first) {
+        columnGid    = referenceEntries[referenceEntry].first;
+        referenceValue = referenceEntries[referenceEntry++].second;
+      } else {
+        columnGid      = structuredEntries[structuredEntry].first;
+        structuredValue = structuredEntries[structuredEntry++].second;
+        referenceValue  = referenceEntries[referenceEntry++].second;
+      }
+
+      const real_type error = TST::magnitude(structuredValue - referenceValue);
+      if (error > localMaxEntryError) {
+        const real_type entryScale = std::max(
+            TST::magnitude(referenceValue),
+            Teuchos::ScalarTraits<real_type>::one());
+        localMaxEntryError = error;
+        localRelativeError = error / entryScale;
+        localMismatchRow   = structuredRowMap->getGlobalElement(rowLid);
+        localMismatchColumn = columnGid;
+        localStructuredValue = structuredValue;
+        localReferenceValue  = referenceValue;
+      }
+    }
+  }
+
+  real_type globalMaxEntryError = Teuchos::ScalarTraits<real_type>::zero();
+  Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1,
+                     &localMaxEntryError, &globalMaxEntryError);
+  const int mismatchOwnerCandidate =
+      localMaxEntryError == globalMaxEntryError ? comm->getRank() : comm->getSize();
+  int mismatchOwner = comm->getSize();
+  Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1,
+                     &mismatchOwnerCandidate, &mismatchOwner);
+
+  GO mismatchGids[2] = {localMismatchRow, localMismatchColumn};
+  SC mismatchValues[2] = {localStructuredValue, localReferenceValue};
+  real_type mismatchRelativeError = localRelativeError;
+  Teuchos::broadcast<int, GO>(*comm, mismatchOwner, 2, mismatchGids);
+  Teuchos::broadcast<int, SC>(*comm, mismatchOwner, 2, mismatchValues);
+  Teuchos::broadcast<int, real_type>(*comm, mismatchOwner, 1,
+                                     &mismatchRelativeError);
+  const GO indexBase = structuredRowMap->getIndexBase();
+  out << "Largest RAP entry mismatch: row GID = " << mismatchGids[0]
+      << ", row DOF = " << (mismatchGids[0] - indexBase) % dofsPerNode
+      << ", column GID = " << mismatchGids[1]
+      << ", column DOF = " << (mismatchGids[1] - indexBase) % dofsPerNode
+      << ", structured value = " << mismatchValues[0]
+      << ", Xpetra value = " << mismatchValues[1]
+      << ", absolute error = " << globalMaxEntryError
+      << ", relative entry error = " << mismatchRelativeError
+      << std::endl;
+
   Teuchos::RCP<Matrix> difference;
   Xpetra::MatrixMatrix<SC, LO, GO, NO>::TwoMatrixAdd(
       *structuredAc, false, TST::one(),
@@ -481,7 +586,12 @@ void compareRAPMatrices(const Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, 
       !(relativeError <= comparisonTolerance),
       std::runtime_error,
       "Final RAP matrices differ: relative Frobenius error = "
-          << relativeError << ", tolerance = " << comparisonTolerance);
+          << relativeError << ", tolerance = " << comparisonTolerance
+          << "; largest entry mismatch is at (" << mismatchGids[0]
+          << ", " << mismatchGids[1] << "): structured = "
+          << mismatchValues[0] << ", Xpetra = " << mismatchValues[1]
+          << ", absolute error = " << globalMaxEntryError
+          << ", relative entry error = " << mismatchRelativeError);
 }
 
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
@@ -511,9 +621,10 @@ void runStructuredRAPComparison(const std::string& matrixType,
   Teuchos::RCP<Xpetra::Matrix<SC, LO, GO, NO> > structuredAc =
       buildCoarseMatrix<SC, LO, GO, NO>(problem, transferData, true, "structured");
   Teuchos::RCP<Xpetra::Matrix<SC, LO, GO, NO> > referenceAc =
-      buildCoarseMatrix<SC, LO, GO, NO>(problem, transferData, false);
+      buildCoarseMatrix<SC, LO, GO, NO>(problem, transferData, true, "xpetra");
 
-  compareRAPMatrices<SC, LO, GO, NO>(structuredAc, referenceAc, out);
+  compareRAPMatrices<SC, LO, GO, NO>(structuredAc, referenceAc,
+                                     Teuchos::as<LO>(problem.dofsPerNode), out);
 }
 
 }  // namespace
@@ -542,9 +653,21 @@ TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(StructuredRAPFactory, ConstantElasticity2D, Sc
 }  // ConstantElasticity2D test
 
 
+TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(StructuredRAPFactory, ConstantElasticity3D, Scalar, LocalOrdinal, GlobalOrdinal, Node) {
+#include "MueLu_UseShortNames.hpp"
+  MUELU_TESTING_SET_OSTREAM;
+  MUELU_TESTING_LIMIT_SCOPE(Scalar, GlobalOrdinal, Node);
+  out << "version: " << MueLu::Version() << std::endl;
+
+  runStructuredRAPComparison<SC, LO, GO, NO>("Elasticity3D", 100, 100, 33,
+                                             -1, -1, -1, 0, "{3}", out);
+}  // ConstantElasticity3D test
+
+
 #define MUELU_ETI_GROUP(Scalar, LO, GO, Node)                                                            \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(StructuredRAPFactory, Constructor, Scalar, LO, GO, Node)          \
-  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(StructuredRAPFactory, ConstantElasticity2D, Scalar, LO, GO, Node)
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(StructuredRAPFactory, ConstantElasticity2D, Scalar, LO, GO, Node)  \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(StructuredRAPFactory, ConstantElasticity3D, Scalar, LO, GO, Node)
 
 #include <MueLu_ETI_4arg.hpp>
 

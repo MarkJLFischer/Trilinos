@@ -73,7 +73,7 @@
       <Parameter name="P"                                   type="string" value="myProlongatorFact"/>
       <Parameter name="rap: triple product"                 type="bool"   value="true"/>
       <Parameter name="rap: prebuild coarse graph"          type="bool"   value="true"/>
-      <Parameter name="rap: triple product implementation"  type="string" value="xpetra"/>
+      <Parameter name="rap: triple product implementation"  type="string" value="structured"/>
       <Parameter name="transpose: use implicit"             type="bool"   value="true"/>
       <ParameterList name="TransferFactories">
         <Parameter name="CoordinateTransfer"                type="string" value="myCoordTransferFact"/>
