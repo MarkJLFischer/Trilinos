@@ -120,6 +120,8 @@ IF(${PACKAGE_NAME}_ENABLE_Stratimikos)
         ${DIR}/Thyra_MueLuTpetraQ2Q1PreconditionerFactory_decl.hpp
         ${DIR}/Thyra_MueLuTpetraQ2Q1PreconditionerFactory_def.hpp
         ${DIR}/Thyra_MueLuTpetraQ2Q1PreconditionerFactory.hpp
+        ${DIR}/../../research/q2q1/MueLu_Q2Q1PFactory.hpp
+        ${DIR}/../../research/q2q1/MueLu_Q2Q1uPFactory.hpp
       )
     ENDIF()
   ENDIF()
