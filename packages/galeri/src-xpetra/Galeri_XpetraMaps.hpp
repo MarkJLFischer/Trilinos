@@ -120,7 +120,7 @@ RCP< ::Xpetra::Map<LocalOrdinal, GlobalOrdinal, Node> > CreateMap(::Xpetra::Unde
 
 #ifndef XPETRA_EPETRA_NO_32BIT_GLOBAL_INDICES
 //! Map creation function (for Xpetra::Map with UnderlyingLib parameter)
-RCP< ::Xpetra::Map<int, int, Tpetra::KokkosClassic::DefaultNode::DefaultNodeType> > CreateMap(::Xpetra::UnderlyingLib lib, const std::string& mapType, const Teuchos::RCP<const Teuchos::Comm<int> >& comm, Teuchos::ParameterList& list) {
+inline RCP< ::Xpetra::Map<int, int, Tpetra::KokkosClassic::DefaultNode::DefaultNodeType> > CreateMap(::Xpetra::UnderlyingLib lib, const std::string& mapType, const Teuchos::RCP<const Teuchos::Comm<int> >& comm, Teuchos::ParameterList& list) {
   typedef int LocalOrdinal;
   typedef int GlobalOrdinal;
   typedef Tpetra::KokkosClassic::DefaultNode::DefaultNodeType Node;
@@ -139,7 +139,7 @@ RCP< ::Xpetra::Map<int, int, Tpetra::KokkosClassic::DefaultNode::DefaultNodeType
 
 #ifndef XPETRA_EPETRA_NO_64BIT_GLOBAL_INDICES
 //! Map creation function (for Xpetra::Map with UnderlyingLib parameter)
-RCP< ::Xpetra::Map<int, long long, Tpetra::KokkosClassic::DefaultNode::DefaultNodeType> > CreateMap64(::Xpetra::UnderlyingLib lib, const std::string& mapType, const Teuchos::RCP<const Teuchos::Comm<int> >& comm, Teuchos::ParameterList& list) {
+inline RCP< ::Xpetra::Map<int, long long, Tpetra::KokkosClassic::DefaultNode::DefaultNodeType> > CreateMap64(::Xpetra::UnderlyingLib lib, const std::string& mapType, const Teuchos::RCP<const Teuchos::Comm<int> >& comm, Teuchos::ParameterList& list) {
   typedef int LocalOrdinal;
   typedef long long GlobalOrdinal;
   typedef Tpetra::KokkosClassic::DefaultNode::DefaultNodeType Node;
