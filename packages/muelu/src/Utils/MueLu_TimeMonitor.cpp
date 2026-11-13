@@ -33,6 +33,25 @@ std::string cleanupLabel(const std::string& label) {
   }
   return clean_label;
 }
+
+RCP<Teuchos::Time> startFlatTimer(const std::string& label) {
+  static std::map<std::string, RCP<Teuchos::Time>> timers;
+  auto it = timers.find(label);
+  RCP<Teuchos::Time> timer;
+  if (it == timers.end()) {
+    timer         = Teuchos::TimeMonitor::getNewTimer(label);
+    timers[label] = timer;
+  } else {
+    timer = it->second;
+  }
+
+  // Teuchos::TimeMonitor's constructor performs these two operations.  Here
+  // we manage the counter directly so that MueLu can record both a stacked
+  // timer and its corresponding aggregate flat timer.
+  timer->incrementNumCalls();
+  timer->start();
+  return timer;
+}
 }  // namespace
 
 TimeMonitor::TimeMonitor(const BaseClass& object, const std::string& msg, MsgType timerLevel) {
@@ -55,21 +74,14 @@ TimeMonitor::TimeMonitor(const BaseClass& object, const std::string& msg, MsgTyp
       if (useStackedTimer_) {
         const auto stackedTimer = Teuchos::TimeMonitor::getStackedTimer();
         stackedTimer->start(label_);
+        // Keep the traditional flat counter as well.  StackedTimer records
+        // the call path, while this counter supplies the aggregate total in
+        // the final TimeMonitor summary.
+        timer_ = startFlatTimer(label_);
       } else
 #endif
       {
-        // TODO: there is no function to register a timer in Teuchos::TimeMonitor after the creation of the timer. But would be useful...
-        static std::map<std::string, RCP<Teuchos::Time>> timers;
-        auto it = timers.find(label_);
-        if (it == timers.end()) {
-          timer_         = Teuchos::TimeMonitor::getNewTimer(label_);
-          timers[label_] = timer_;
-        } else {
-          timer_ = it->second;
-          // Start the timer (this is what is done by Teuchos::TimeMonitor)
-          timer_->incrementNumCalls();
-          timer_->start();
-        }
+        timer_ = startFlatTimer(label_);
       }
     } else {
       timer_ = rcp(new Teuchos::Time(label_));
@@ -101,6 +113,9 @@ TimeMonitor::~TimeMonitor() {
                  "ordering of timer creation and destuction or disable the StackedTimer\n";
       std::cout << warning.str() << std::endl;
       Teuchos::TimeMonitor::setStackedTimer(Teuchos::null);
+    }
+    if (timer_ != Teuchos::null) {
+      timer_->stop();
     }
   } else
 #endif
