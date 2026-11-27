@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include <Kokkos_Core.hpp>
@@ -23,18 +24,19 @@
 #include <Teuchos_ScalarTraits.hpp>
 #include <Teuchos_TimeMonitor.hpp>
 
-#include <Xpetra_MapFactory.hpp>
 #include <Xpetra_Matrix.hpp>
-#include <Xpetra_VectorFactory.hpp>
+#include <Xpetra_ImportFactory.hpp>
+#include <Xpetra_MapFactory.hpp>
+#include <Xpetra_MultiVectorFactory.hpp>
 
 namespace MueLu {
 namespace Details {
 
 /**
- * Specialized numeric kernel for two- and three-dimensional structured RAP.
+ * Specialized numeric kernel for one-, two-, and three-dimensional structured RAP.
  *
- * The implemented path requires two or three dimensions and order-zero interpolation.
- * Its numeric plan is generated from the detected fine stencil and sparse graphs
+ * The implemented path supports order-zero and order-one interpolation.
+ * Its numeric plan is generated from the detected fine stencil and sparse graphs.
  */
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 class StructuredRAPKernel {
@@ -45,6 +47,7 @@ class StructuredRAPKernel {
   using LO          = LocalOrdinal;
   using device_type = typename Node::device_type;
   using lo_view     = Kokkos::View<LocalOrdinal*, device_type>;
+  using scalar_view = Kokkos::View<Scalar*, device_type>;
   using size_view   = Kokkos::View<size_t*, device_type>;
 
   KOKKOS_INLINE_FUNCTION
@@ -66,6 +69,40 @@ class StructuredRAPKernel {
                                                 : coarseAnchor(coarse + 1, numFine, numCoarse, rate);
     return {{coarse == 0 ? LO(0) : previous + (anchor - previous) / 2 + 1,
              coarse + 1 == numCoarse ? numFine - 1 : anchor + (next - anchor) / 2}};
+  }
+
+  // Inclusive support of a piecewise-linear coarse basis function.
+  KOKKOS_INLINE_FUNCTION
+  static Kokkos::Array<LO, 2> linearSupportBounds(LO coarse, LO numFine,
+                                                  LO numCoarse, LO rate) {
+    return {{coarse == 0 ? LO(0) : coarseAnchor(coarse - 1, numFine, numCoarse, rate),
+             coarse + 1 == numCoarse ? numFine - 1
+                                     : coarseAnchor(coarse + 1, numFine, numCoarse, rate)}};
+  }
+
+  template <class Weight>
+  KOKKOS_INLINE_FUNCTION static Weight linearBasisWeight(
+      const Kokkos::Array<LO, 3>& fine,
+      const Kokkos::Array<LO, 3>& coarse,
+      const Kokkos::Array<LO, 3>& fineNodes,
+      const Kokkos::Array<LO, 3>& coarseNodes,
+      const Kokkos::Array<LO, 3>& rate, const int numDimensions) {
+    Weight weight = Weight(1);
+    for (int dim = 0; dim < numDimensions; ++dim) {
+      const LO anchor = coarseAnchor(coarse[dim], fineNodes[dim], coarseNodes[dim], rate[dim]);
+      if (fine[dim] < anchor) {
+        if (coarse[dim] == 0)
+          return Weight(0);
+        const LO previous = coarseAnchor(coarse[dim] - 1, fineNodes[dim], coarseNodes[dim], rate[dim]);
+        weight *= Weight(fine[dim] - previous) / Weight(anchor - previous);
+      } else if (fine[dim] > anchor) {
+        if (coarse[dim] + 1 == coarseNodes[dim])
+          return Weight(0);
+        const LO next = coarseAnchor(coarse[dim] + 1, fineNodes[dim], coarseNodes[dim], rate[dim]);
+        weight *= Weight(next - fine[dim]) / Weight(next - anchor);
+      }
+    }
+    return weight;
   }
 
   static size_t boundaryClass(LO coarse, LO numCoarse,
@@ -124,6 +161,16 @@ class StructuredRAPKernel {
     values.erase(std::unique(values.begin(), values.end()), values.end());
   }
 
+  template <int InterpolationOrder, class LocalMatrix, class CoefficientView>
+  KOKKOS_INLINE_FUNCTION static auto weightedAValue(
+      const LocalMatrix& localA, const size_t address,
+      const CoefficientView& coefficients, const size_t contribution) {
+    auto value = localA.values(address);
+    if (InterpolationOrder == 1)
+      value *= coefficients(contribution);
+    return value;
+  }
+
  public:
   struct AxisClassMap {
     lo_view boundaryClasses;
@@ -166,30 +213,6 @@ class StructuredRAPKernel {
     if (remainder > activeRate / 2)
       ++coarse;
     return coarse;
-  }
-
-  KOKKOS_INLINE_FUNCTION
-  static LO coarseRowForFineRow(
-      const LO fineRow, const LO dofsPerNode,
-      const Kokkos::Array<LO, 3>& fineNodes,
-      const Kokkos::Array<LO, 3>& coarseNodes,
-      const Kokkos::Array<LO, 3>& rate) {
-    const LO fineNode = fineRow / dofsPerNode;
-    const LO fineX    = fineNode % fineNodes[0];
-    const LO fineYZ   = fineNode / fineNodes[0];
-    const LO coarseX  = constantInterpolationCoarse(
-         fineX, fineNodes[0], rate[0]);
-    const LO coarseY = constantInterpolationCoarse(
-        fineYZ % fineNodes[1], fineNodes[1], rate[1]);
-    const LO coarseZ = constantInterpolationCoarse(
-        fineYZ / fineNodes[1], fineNodes[2], rate[2]);
-    return static_cast<LO>(
-        (static_cast<size_t>(coarseX) +
-         static_cast<size_t>(coarseNodes[0]) *
-             (static_cast<size_t>(coarseY) +
-              static_cast<size_t>(coarseNodes[1]) * coarseZ)) *
-            dofsPerNode +
-        fineRow % dofsPerNode);
   }
 
  public:
@@ -248,7 +271,7 @@ class StructuredRAPKernel {
         static_cast<size_t>(dofsPerNode);
     const bool distributed = A.getRowMap()->getComm()->getSize() > 1;
     const bool useDetectedStencil =
-        interpolationOrder == 0 &&
+        (interpolationOrder == 0 || interpolationOrder == 1) &&
         (numDimensions >= 1 && numDimensions <= 3) &&
         structuredDimensionsMatch &&
         A.GetFixedBlockSize() == dofsPerNode &&
@@ -257,101 +280,20 @@ class StructuredRAPKernel {
 
     if (!useDetectedStencil)
       throw std::runtime_error(
-          "StructuredRAPKernel supports only 1D, 2D, or 3D order-zero structured RAP.");
+          "StructuredRAPKernel supports only 1D, 2D, or 3D order-zero or order-one structured RAP.");
 
     const auto localA            = A.getLocalMatrixDevice();
     auto localAc                 = Ac.getLocalMatrixDevice();
     using local_scalar_type      = typename decltype(localA.values)::non_const_value_type;
     const local_scalar_type zero = KokkosKernels::ArithTraits<local_scalar_type>::zero();
 
-    using GOVector = Xpetra::Vector<GlobalOrdinal, LO, GlobalOrdinal, Node>;
-    Teuchos::RCP<const Xpetra::Map<LO, GlobalOrdinal, Node>> remoteFineMap;
-    Teuchos::RCP<GOVector> remoteCoarseGids;
-    if (distributed) {
-      TEUCHOS_TEST_FOR_EXCEPTION(
-          !P.getRowMap()->isSameAs(*A.getRowMap()), std::runtime_error,
-          "StructuredRAPKernel requires A and P to have identical row maps.");
-
-      const auto graphImporter = A.getCrsGraph()->getImporter();
-      TEUCHOS_TEST_FOR_EXCEPTION(
-          graphImporter.is_null(), std::runtime_error,
-          "StructuredRAPKernel requires an A graph importer in parallel.");
-      const auto remoteLids = graphImporter->getRemoteLIDs();
-      lo_view remoteLidsDevice(
-          Kokkos::ViewAllocateWithoutInitializing(
-              "StructuredRAP: remote fine LIDs"),
-          remoteLids.size());
-      auto remoteLidsMirror = Kokkos::create_mirror_view(remoteLidsDevice);
-      for (size_t i = 0; i < static_cast<size_t>(remoteLids.size()); ++i)
-        remoteLidsMirror(i) = remoteLids[i];
-      Kokkos::deep_copy(executionSpace, remoteLidsDevice, remoteLidsMirror);
-      Kokkos::View<GlobalOrdinal*, device_type> remoteFineGidsDevice(
-          Kokkos::ViewAllocateWithoutInitializing(
-              "StructuredRAP: remote fine GIDs"),
-          remoteLids.size());
-      const auto fineColumnMap = A.getColMap()->getLocalMap();
-      Kokkos::parallel_for(
-          "StructuredRAP: map remote fine GIDs",
-          range_policy(executionSpace, 0, remoteLids.size()),
-          KOKKOS_LAMBDA(const size_t i) {
-            remoteFineGidsDevice(i) =
-                fineColumnMap.getGlobalElement(remoteLidsDevice(i));
-          });
-      const auto remoteFineGidsHost = Kokkos::create_mirror_view_and_copy(
-          Kokkos::HostSpace(), remoteFineGidsDevice);
-      Teuchos::Array<GlobalOrdinal> remoteFineGids(remoteLids.size());
-      for (size_t i = 0; i < static_cast<size_t>(remoteLids.size()); ++i)
-        remoteFineGids[i] = remoteFineGidsHost(i);
-      remoteFineMap = Xpetra::MapFactory<LO, GlobalOrdinal, Node>::Build(
-          A.getRowMap()->lib(),
-          Teuchos::OrdinalTraits<Xpetra::global_size_t>::invalid(),
-          remoteFineGids(), A.getRowMap()->getIndexBase(),
-          A.getRowMap()->getComm());
-      const auto remoteImporter =
-          graphImporter->createRemoteOnlyImport(remoteFineMap);
-
-      const auto localP = P.getLocalMatrixDevice();
-      auto ownedCoarseGids =
-          Xpetra::VectorFactory<GlobalOrdinal, LO, GlobalOrdinal, Node>::Build(
-              A.getRowMap(), false);
-      auto ownedData = ownedCoarseGids->getLocalViewDevice(
-          Tpetra::Access::OverwriteAll);
-      const auto coarseColumnMap = P.getColMap()->getLocalMap();
-      const auto exportLidsHost  = remoteImporter->getExportLIDs();
-      PlanArray<lo_view> exportLids(
-          "StructuredRAP: halo export LIDs", exportLidsHost.size());
-      for (size_t i = 0; i < static_cast<size_t>(exportLidsHost.size()); ++i)
-        exportLids.host(i) = exportLidsHost[i];
-      const auto exportLidsDevice     = exportLids.copyToDevice(executionSpace);
-      size_t invalidInterpolationRows = 0;
-      Kokkos::parallel_reduce(
-          "StructuredRAP: build halo coarse target GIDs",
-          range_policy(executionSpace, 0,
-                       static_cast<size_t>(exportLidsHost.size())),
-          KOKKOS_LAMBDA(const size_t exportIndex, size_t& invalid) {
-            const LO row          = exportLidsDevice(exportIndex);
-            const size_t rowBegin = localP.graph.row_map(row);
-            const size_t rowEnd   = localP.graph.row_map(row + 1);
-            if (rowEnd - rowBegin != size_t(1)) {
-              ++invalid;
-              return;
-            }
-            ownedData(row, 0) = coarseColumnMap.getGlobalElement(
-                localP.graph.entries(rowBegin));
-          },
-          invalidInterpolationRows);
-      executionSpace.fence("StructuredRAP: coarse target GIDs ready");
-      TEUCHOS_TEST_FOR_EXCEPTION(
-          invalidInterpolationRows != 0, std::runtime_error,
-          "StructuredRAPKernel requires exactly one interpolation entry per fine row.");
-
-      remoteCoarseGids =
-          Xpetra::VectorFactory<GlobalOrdinal, LO, GlobalOrdinal, Node>::Build(
-              remoteFineMap, false);
-      remoteCoarseGids->doImport(
-          *ownedCoarseGids, *remoteImporter, Xpetra::INSERT);
-    }
-
+    const size_t maxInterpolationEntries = interpolationOrder == 0
+                                               ? size_t(1)
+                                               : size_t(1) << numDimensions;
+    const GlobalOrdinal invalidGO = Teuchos::OrdinalTraits<GlobalOrdinal>::invalid();
+    const Scalar scalarZero       = Teuchos::ScalarTraits<Scalar>::zero();
+    const Scalar scalarOne        = Teuchos::ScalarTraits<Scalar>::one();
+    // Both interpolation orders use the compact contribution-plan implementation below.
     const size_t numFineStencilOffsets = fineStencil.stencilOffsets.size();
     Kokkos::Array<int, 3> minStencilOffset{{fineStencil.stencilOffsets[0].x,
                                             fineStencil.stencilOffsets[0].y,
@@ -377,6 +319,7 @@ class StructuredRAPKernel {
     size_view reverseFineNodeOffsets;
     size_view reverseARowEntryOffsets;
     size_view reverseDirectAValueOffsets;
+    scalar_view reverseCoefficients;
     Kokkos::Array<size_t, 3> numAggregatePlanClasses;
     size_t maxAcEntriesPerRow = 0;
     {
@@ -384,13 +327,20 @@ class StructuredRAPKernel {
           *Teuchos::TimeMonitor::getNewTimer(
               timerPrefix + "prepare numeric entry plan"));
 
-      const bool fineStencilHasCenter = std::any_of(
-          fineStencil.stencilOffsets.begin(), fineStencil.stencilOffsets.end(),
-          [](const auto& offset) {
-            return offset.x == 0 && offset.y == 0 && offset.z == 0;
-          });
-      maxAcEntriesPerRow =
-          (numFineStencilOffsets + (fineStencilHasCenter ? size_t(0) : size_t(1))) * numDofs;
+      if (interpolationOrder == 0) {
+        const bool fineStencilHasCenter = std::any_of(
+            fineStencil.stencilOffsets.begin(), fineStencil.stencilOffsets.end(),
+            [](const auto& offset) {
+              return offset.x == 0 && offset.y == 0 && offset.z == 0;
+            });
+        maxAcEntriesPerRow =
+            (numFineStencilOffsets +
+             (fineStencilHasCenter ? size_t(0) : size_t(1))) * numDofs;
+      } else {
+        maxAcEntriesPerRow = (numDimensions == 1 ? size_t(3)
+                              : numDimensions == 2 ? size_t(9)
+                                                   : size_t(27)) * numDofs;
+      }
 
       const size_t leftBoundaryDepth[3] = {
           static_cast<size_t>(std::max(0, -minStencilOffset[0])),
@@ -414,24 +364,42 @@ class StructuredRAPKernel {
         std::vector<std::vector<int>> aggregateSignatures;
         std::vector<int> aggregateSignature;
         auto aggregateClass = [&](const LO coarse) {
-          const auto bounds  = aggregateBounds(coarse, numFine, numCoarse, rate);
+          const auto bounds  = interpolationOrder == 0
+                                   ? aggregateBounds(coarse, numFine, numCoarse, rate)
+                                   : linearSupportBounds(coarse, numFine, numCoarse, rate);
           const LO fineBegin = bounds[0], fineEnd = bounds[1];
           aggregateSignature.clear();
           aggregateSignature.push_back(static_cast<int>(
               boundaryClass(coarse, numCoarse, leftDepth, rightDepth)));
           for (LO fine = fineBegin; fine <= fineEnd; ++fine) {
-            const LO fineCoarse = constantInterpolationCoarse(
-                fine, numFine, rate);
-            aggregateSignature.push_back(static_cast<int>(boundaryClass(
-                fineCoarse, numCoarse, leftDepth, rightDepth)));
+            LO fineCoarse = LO(0);
+            if (interpolationOrder == 0) {
+              fineCoarse = constantInterpolationCoarse(fine, numFine, rate);
+              aggregateSignature.push_back(static_cast<int>(boundaryClass(
+                  fineCoarse, numCoarse, leftDepth, rightDepth)));
+            } else {
+              aggregateSignature.push_back(static_cast<int>(fine - coarseAnchor(
+                  coarse, numFine, numCoarse, rate)));
+            }
             for (int offset = minOffset; offset <= maxOffset; ++offset) {
               const LO neighbor = fine + static_cast<LO>(offset);
               const bool valid  = neighbor >= LO(0) && neighbor < numFine;
               aggregateSignature.push_back(valid);
-              aggregateSignature.push_back(valid ? static_cast<int>(
-                                                       constantInterpolationCoarse(neighbor, numFine, rate) -
-                                                       fineCoarse)
-                                                 : 0);
+              if (interpolationOrder == 0) {
+                aggregateSignature.push_back(valid ? static_cast<int>(
+                                                         constantInterpolationCoarse(neighbor, numFine, rate) -
+                                                         fineCoarse)
+                                                   : 0);
+              } else if (valid) {
+                LO lower = neighbor / rate;
+                if (lower + 1 >= numCoarse)
+                  lower = numCoarse - 2;
+                const LO left  = coarseAnchor(lower, numFine, numCoarse, rate);
+                const LO right = coarseAnchor(lower + 1, numFine, numCoarse, rate);
+                aggregateSignature.push_back(static_cast<int>(lower - coarse));
+                aggregateSignature.push_back(static_cast<int>(neighbor - left));
+                aggregateSignature.push_back(static_cast<int>(right - left));
+              }
             }
           }
           const auto found = std::find(
@@ -572,12 +540,14 @@ class StructuredRAPKernel {
           reversePlanRowCount * maxAcEntriesPerRow;
       struct PlanContribution {
         size_t fineNodeOffset, aRowEntryOffset, directAValueOffset;
+        Scalar coefficient;
       };
       std::vector<std::vector<PlanContribution>> reverseBuckets(reverseBucketCount);
       struct PendingContribution {
         size_t reverseRow, fineNodeOffset, aRowEntryOffset, directAValueOffset;
         size_t acRowBegin, acRowEnd;
         size_t aEntry;
+        Scalar restrictionWeight;
       };
       std::vector<PendingContribution> pendingContributions;
       std::vector<size_t> planAcEntries;
@@ -624,6 +594,17 @@ class StructuredRAPKernel {
                     const size_t sourceFineNode =
                         fineX + static_cast<size_t>(localFineNodes[0]) *
                                     (fineY + static_cast<size_t>(localFineNodes[1]) * fineZ);
+                    const Scalar restrictionWeight = interpolationOrder == 0
+                        ? scalarOne
+                        : linearBasisWeight<Scalar>(
+                              Kokkos::Array<LO, 3>{{static_cast<LO>(fineX),
+                                                    static_cast<LO>(fineY),
+                                                    static_cast<LO>(fineZ)}},
+                              Kokkos::Array<LO, 3>{{coarseX, coarseY, coarseZ}},
+                              localFineNodes, localCoarseNodes,
+                              coarseningRate, numDimensions);
+                    if (restrictionWeight == scalarZero)
+                      continue;
                     const size_t aRowBegin =
                         aRowMapOffset(sourceFineNode * numDofs + rowDof);
                     const size_t aRowEnd =
@@ -633,7 +614,7 @@ class StructuredRAPKernel {
                           reverseRow, sourceFineNode - firstFineNode,
                           aEntry - aRowBegin, aEntry - firstAValue,
                           acRowBegin, acRowEnd,
-                          aEntry});
+                          aEntry, restrictionWeight});
                   }
                 }
               }
@@ -658,123 +639,198 @@ class StructuredRAPKernel {
       std::vector<LO> planFineColumns;
       planFineColumns.reserve(pendingContributions.size());
       for (const auto& contribution : pendingContributions) {
-        const size_t entry = static_cast<size_t>(std::lower_bound(
-                                                     planAEntries.begin(), planAEntries.end(),
-                                                     contribution.aEntry) -
-                                                 planAEntries.begin());
-        planFineColumns.push_back(gatheredAEntriesHost(entry));
+        const size_t fineEntry = static_cast<size_t>(std::lower_bound(
+            planAEntries.begin(), planAEntries.end(), contribution.aEntry) -
+            planAEntries.begin());
+        planFineColumns.push_back(gatheredAEntriesHost(fineEntry));
       }
       std::sort(planFineColumns.begin(), planFineColumns.end());
       planFineColumns.erase(
           std::unique(planFineColumns.begin(), planFineColumns.end()),
           planFineColumns.end());
 
-      PlanArray<lo_view> fineColumns(
-          "StructuredRAP: plan fine columns", planFineColumns.size());
-      for (size_t column = 0; column < planFineColumns.size(); ++column)
-        fineColumns.host(column) = planFineColumns[column];
-      const auto fineColumnsDevice = fineColumns.copyToDevice(executionSpace);
-      lo_view targetColumnsDevice(
-          Kokkos::ViewAllocateWithoutInitializing(
-              "StructuredRAP: plan target columns"),
-          planFineColumns.size());
-      const auto fineColumnMap   = A.getColMap()->getLocalMap();
-      const auto fineRowMap      = A.getRowMap()->getLocalMap();
-      const auto coarseRowMap    = Ac.getRowMap()->getLocalMap();
-      const auto coarseColumnMap = Ac.getColMap()->getLocalMap();
-      const LO invalid           = Teuchos::OrdinalTraits<LO>::invalid();
-      size_t invalidTargets      = 0;
-      if (distributed) {
-        const auto remoteFineLocalMap = remoteFineMap->getLocalMap();
-        const auto remoteCoarseData   = remoteCoarseGids->getLocalViewDevice(
-              Tpetra::Access::ReadOnly);
-        Kokkos::parallel_reduce(
-            "StructuredRAP: map plan columns", range_policy(executionSpace, 0, planFineColumns.size()),
-            KOKKOS_LAMBDA(const size_t column, size_t& invalidCount) {
-              const GlobalOrdinal fineGid = fineColumnMap.getGlobalElement(
-                  fineColumnsDevice(column));
-              const LO ownedFine = fineRowMap.getLocalElement(fineGid);
-              GlobalOrdinal coarseGid;
-              if (ownedFine != invalid) {
-                coarseGid = coarseRowMap.getGlobalElement(
-                    coarseRowForFineRow(ownedFine, dofsPerNode,
-                                        localFineNodes, localCoarseNodes,
-                                        coarseningRate));
+      using TargetArray = Kokkos::Array<GlobalOrdinal, 8>;
+      using WeightArray = Kokkos::Array<Scalar, 3>;
+      using TargetWeightArray = Kokkos::Array<Scalar, 8>;
+      std::vector<TargetArray> planTargetGids(planFineColumns.size());
+      std::vector<TargetWeightArray> planTargetWeights(planFineColumns.size());
+      const auto fineColumnMap = A.getColMap();
+      const auto fineRowMap    = A.getRowMap();
+      const auto coarseRowMap  = Ac.getRowMap();
+      const auto coarseColumnMap = Ac.getColMap();
+      const LO invalidLO = Teuchos::OrdinalTraits<LO>::invalid();
+
+      auto fillInterpolationMetadata =
+          [&](const LO fineRow, TargetArray& targets,
+              TargetWeightArray& targetWeights) {
+            for (size_t entry = 0; entry < size_t(8); ++entry) {
+              targets[entry] = invalidGO;
+              targetWeights[entry] = scalarZero;
+            }
+            WeightArray axisWeights;
+            for (int dim = 0; dim < 3; ++dim)
+              axisWeights[dim] = scalarZero;
+
+            const LO fineNode = fineRow / dofsPerNode;
+            const LO dof      = fineRow % dofsPerNode;
+            const LO fine[3] = {
+                fineNode % localFineNodes[0],
+                (fineNode / localFineNodes[0]) % localFineNodes[1],
+                fineNode / (localFineNodes[0] * localFineNodes[1])};
+            LO coarseBase[3] = {LO(0), LO(0), LO(0)};
+            for (int dim = 0; dim < numDimensions; ++dim) {
+              if (interpolationOrder == 0) {
+                coarseBase[dim] = constantInterpolationCoarse(
+                    fine[dim], localFineNodes[dim], coarseningRate[dim]);
               } else {
-                const LO remoteFine = remoteFineLocalMap.getLocalElement(fineGid);
-                if (remoteFine == invalid) {
-                  ++invalidCount;
-                  return;
-                }
-                coarseGid = remoteCoarseData(remoteFine, 0);
+                LO lower = fine[dim] / coarseningRate[dim];
+                if (lower + 1 >= localCoarseNodes[dim])
+                  lower = localCoarseNodes[dim] - 2;
+                coarseBase[dim] = lower;
+                const LO left = coarseAnchor(
+                    lower, localFineNodes[dim], localCoarseNodes[dim], coarseningRate[dim]);
+                const LO right = coarseAnchor(
+                    lower + 1, localFineNodes[dim], localCoarseNodes[dim], coarseningRate[dim]);
+                axisWeights[dim] =
+                    Scalar(fine[dim] - left) / Scalar(right - left);
               }
-              const LO target = coarseColumnMap.getLocalElement(coarseGid);
-              if (target == invalid)
-                ++invalidCount;
-              else
-                targetColumnsDevice(column) = target;
-            },
-            invalidTargets);
-      } else {
-        Kokkos::parallel_reduce(
-            "StructuredRAP: map plan columns", range_policy(executionSpace, 0, planFineColumns.size()),
-            KOKKOS_LAMBDA(const size_t column, size_t& invalidCount) {
-              const GlobalOrdinal fineGid = fineColumnMap.getGlobalElement(
-                  fineColumnsDevice(column));
-              const LO ownedFine = fineRowMap.getLocalElement(fineGid);
-              if (ownedFine == invalid) {
-                ++invalidCount;
-                return;
+            }
+
+            size_t target = 0;
+            for (size_t corner = 0; corner < maxInterpolationEntries; ++corner) {
+              Scalar weight = scalarOne;
+              LO coarse[3] = {coarseBase[0], coarseBase[1], coarseBase[2]};
+              for (int dim = 0; dim < numDimensions; ++dim) {
+                const bool upper = interpolationOrder == 1 &&
+                                   (corner & (size_t(1) << dim));
+                if (upper)
+                  ++coarse[dim];
+                if (interpolationOrder == 1)
+                  weight *= upper ? axisWeights[dim]
+                                  : scalarOne - axisWeights[dim];
               }
-              const GlobalOrdinal coarseGid =
-                  coarseRowMap.getGlobalElement(coarseRowForFineRow(
-                      ownedFine, dofsPerNode, localFineNodes,
-                      localCoarseNodes, coarseningRate));
-              const LO target = coarseColumnMap.getLocalElement(coarseGid);
-              if (target == invalid)
-                ++invalidCount;
-              else
-                targetColumnsDevice(column) = target;
-            },
-            invalidTargets);
+              if (weight == scalarZero)
+                continue;
+              const size_t coarseNode =
+                  static_cast<size_t>(coarse[0]) +
+                  static_cast<size_t>(localCoarseNodes[0]) *
+                      (static_cast<size_t>(coarse[1]) +
+                       static_cast<size_t>(localCoarseNodes[1]) * coarse[2]);
+              targets[target++] = coarseRowMap->getGlobalElement(
+                  static_cast<LO>(coarseNode * numDofs + dof));
+              targetWeights[target - 1] = weight;
+            }
+          };
+
+      Teuchos::Array<GlobalOrdinal> remoteFineGids;
+      std::vector<size_t> remotePlanColumns;
+      for (size_t column = 0; column < planFineColumns.size(); ++column) {
+        const GlobalOrdinal fineGid =
+            fineColumnMap->getGlobalElement(planFineColumns[column]);
+        const LO ownedFine = fineRowMap->getLocalElement(fineGid);
+        if (ownedFine != invalidLO) {
+          fillInterpolationMetadata(
+              ownedFine, planTargetGids[column], planTargetWeights[column]);
+        } else {
+          remoteFineGids.push_back(fineGid);
+          remotePlanColumns.push_back(column);
+        }
       }
-      TEUCHOS_TEST_FOR_EXCEPTION(
-          invalidTargets != 0, std::runtime_error,
-          "StructuredRAPKernel could not map a fine column to its coarse interpolation target.");
-      const auto targetColumnsHost = Kokkos::create_mirror_view_and_copy(
-          Kokkos::HostSpace(), targetColumnsDevice);
-      for (size_t contributionIndex = 0;
-           contributionIndex < pendingContributions.size();
-           ++contributionIndex) {
-        const auto& contribution = pendingContributions[contributionIndex];
-        const size_t fineEntry   = static_cast<size_t>(std::lower_bound(
-                                                           planAEntries.begin(), planAEntries.end(),
-                                                           contribution.aEntry) -
-                                                     planAEntries.begin());
-        const LO fineColumn      = gatheredAEntriesHost(fineEntry);
-        const size_t column      = static_cast<size_t>(std::lower_bound(
-                                                           planFineColumns.begin(), planFineColumns.end(),
-                                                           fineColumn) -
-                                                  planFineColumns.begin());
-        const LO targetColumn    = targetColumnsHost(column);
-        for (size_t acEntry = contribution.acRowBegin;
-             acEntry < contribution.acRowEnd; ++acEntry) {
-          const size_t compactAcEntry = static_cast<size_t>(std::lower_bound(
-                                                                planAcEntries.begin(), planAcEntries.end(),
-                                                                acEntry) -
-                                                            planAcEntries.begin());
-          if (gatheredAcEntriesHost(compactAcEntry) == targetColumn) {
-            const size_t bucket = contribution.reverseRow * maxAcEntriesPerRow +
-                                  acEntry - contribution.acRowBegin;
-            reverseBuckets[bucket].push_back(PlanContribution{
-                contribution.fineNodeOffset,
-                contribution.aRowEntryOffset,
-                contribution.directAValueOffset});
-            break;
+
+      if (distributed) {
+        const auto remoteFineMap =
+            Xpetra::MapFactory<LO, GlobalOrdinal, Node>::Build(
+                A.getRowMap()->lib(),
+                Teuchos::OrdinalTraits<Xpetra::global_size_t>::invalid(),
+                remoteFineGids(), A.getRowMap()->getIndexBase(),
+                A.getRowMap()->getComm());
+        const auto remoteImporter =
+            Xpetra::ImportFactory<LO, GlobalOrdinal, Node>::Build(
+                A.getRowMap(), remoteFineMap);
+
+        auto ownedTargets =
+            Xpetra::MultiVectorFactory<GlobalOrdinal, LO, GlobalOrdinal, Node>::Build(
+                A.getRowMap(), maxInterpolationEntries, false);
+        auto ownedTargetWeights =
+            Xpetra::MultiVectorFactory<Scalar, LO, GlobalOrdinal, Node>::Build(
+                A.getRowMap(), maxInterpolationEntries, false);
+        auto ownedTargetData =
+            ownedTargets->getLocalViewHost(Tpetra::Access::OverwriteAll);
+        auto ownedTargetWeightData =
+            ownedTargetWeights->getLocalViewHost(Tpetra::Access::OverwriteAll);
+        const auto exportLids = remoteImporter->getExportLIDs();
+        for (const LO exportLid : exportLids) {
+          TargetArray targets;
+          TargetWeightArray targetWeights;
+          fillInterpolationMetadata(exportLid, targets, targetWeights);
+          for (size_t entry = 0; entry < maxInterpolationEntries; ++entry) {
+            ownedTargetData(exportLid, entry) = targets[entry];
+            ownedTargetWeightData(exportLid, entry) = targetWeights[entry];
+          }
+        }
+
+        auto remoteTargets =
+            Xpetra::MultiVectorFactory<GlobalOrdinal, LO, GlobalOrdinal, Node>::Build(
+                remoteFineMap, maxInterpolationEntries, false);
+        auto remoteTargetWeights =
+            Xpetra::MultiVectorFactory<Scalar, LO, GlobalOrdinal, Node>::Build(
+                remoteFineMap, maxInterpolationEntries, false);
+        remoteTargets->doImport(*ownedTargets, *remoteImporter, Xpetra::INSERT);
+        remoteTargetWeights->doImport(
+            *ownedTargetWeights, *remoteImporter, Xpetra::INSERT);
+        const auto remoteTargetData =
+            remoteTargets->getLocalViewHost(Tpetra::Access::ReadOnly);
+        const auto remoteTargetWeightData =
+            remoteTargetWeights->getLocalViewHost(Tpetra::Access::ReadOnly);
+        for (size_t remote = 0; remote < remotePlanColumns.size(); ++remote) {
+          const size_t column = remotePlanColumns[remote];
+          for (size_t entry = 0; entry < maxInterpolationEntries; ++entry) {
+            planTargetGids[column][entry] = remoteTargetData(remote, entry);
+            planTargetWeights[column][entry] =
+                remoteTargetWeightData(remote, entry);
           }
         }
       }
 
+      for (const auto& contribution : pendingContributions) {
+        const size_t fineEntry = static_cast<size_t>(std::lower_bound(
+            planAEntries.begin(), planAEntries.end(), contribution.aEntry) -
+            planAEntries.begin());
+        const LO fineColumn = gatheredAEntriesHost(fineEntry);
+        const size_t column = static_cast<size_t>(std::lower_bound(
+            planFineColumns.begin(), planFineColumns.end(), fineColumn) -
+            planFineColumns.begin());
+        for (size_t interpolation = 0;
+             interpolation < maxInterpolationEntries; ++interpolation) {
+          const GlobalOrdinal targetGid =
+              planTargetGids[column][interpolation];
+          if (targetGid == invalidGO)
+            continue;
+          const Scalar targetWeight = planTargetWeights[column][interpolation];
+          const LO targetColumn =
+              coarseColumnMap->getLocalElement(targetGid);
+          if (targetColumn == invalidLO)
+            continue;
+          for (size_t acEntry = contribution.acRowBegin;
+               acEntry < contribution.acRowEnd; ++acEntry) {
+            const size_t compactAcEntry = static_cast<size_t>(
+                std::lower_bound(planAcEntries.begin(), planAcEntries.end(),
+                                 acEntry) -
+                planAcEntries.begin());
+            if (gatheredAcEntriesHost(compactAcEntry) == targetColumn) {
+              const size_t bucket =
+                  contribution.reverseRow * maxAcEntriesPerRow +
+                  acEntry - contribution.acRowBegin;
+              reverseBuckets[bucket].push_back(PlanContribution{
+                  contribution.fineNodeOffset,
+                  contribution.aRowEntryOffset,
+                  contribution.directAValueOffset,
+                  contribution.restrictionWeight * targetWeight});
+              break;
+            }
+          }
+        }
+      }
       size_t numContributions = 0;
       for (const auto& bucket : reverseBuckets)
         numContributions += bucket.size();
@@ -802,6 +858,16 @@ class StructuredRAPKernel {
       reverseFineNodeOffsets           = fineNodeOffsets.copyToDevice(executionSpace);
       reverseARowEntryOffsets          = aRowEntryOffsets.copyToDevice(executionSpace);
       reverseDirectAValueOffsets       = directAValueOffsets.copyToDevice(executionSpace);
+      if (interpolationOrder == 1) {
+        PlanArray<scalar_view> coefficients(
+            "StructuredRAP: reverse interpolation coefficients", numContributions);
+        contribution = 0;
+        for (const auto& bucket : reverseBuckets)
+          for (const auto& entry : bucket)
+            coefficients.host(contribution++) = entry.coefficient;
+        reverseCoefficients = coefficients.copyToDevice(executionSpace);
+        executionSpace.fence("StructuredRAP: interpolation coefficients ready");
+      }
 
       executionSpace.fence("StructuredRAP: numeric entry plan prepared");
     }
@@ -810,12 +876,15 @@ class StructuredRAPKernel {
       Teuchos::TimeMonitor timer(
           *Teuchos::TimeMonitor::getNewTimer(
               timerPrefix +
-              "numeric (constant stencil)"));
-      range_policy policy(executionSpace, 0, numCoarseNodes);
-      Kokkos::parallel_for(
-          "StructuredRAP: constant stencil P^T A P",
-          policy,
-          KOKKOS_LAMBDA(const size_t coarseNodeIndex) {
+              "numeric (structured interpolation)"));
+      auto runNumeric = [&](auto interpolationOrderTag) {
+        constexpr int numericInterpolationOrder =
+            decltype(interpolationOrderTag)::value;
+        range_policy policy(executionSpace, 0, numCoarseNodes);
+        Kokkos::parallel_for(
+            "StructuredRAP: structured interpolation P^T A P",
+            policy,
+            KOKKOS_LAMBDA(const size_t coarseNodeIndex) {
             const LO coarseNode         = static_cast<LO>(coarseNodeIndex);
             const LO coarseX            = coarseNode % localCoarseNodes[0];
             const LO coarseYZ           = coarseNode / localCoarseNodes[0];
@@ -823,12 +892,15 @@ class StructuredRAPKernel {
             const LO coarseZ            = coarseYZ / localCoarseNodes[1];
             const size_t firstCoarseRow = coarseNodeIndex * numDofs;
 
-            const auto fineXBounds = aggregateBounds(
-                coarseX, localFineNodes[0], localCoarseNodes[0], coarseningRate[0]);
-            const auto fineYBounds = aggregateBounds(
-                coarseY, localFineNodes[1], localCoarseNodes[1], coarseningRate[1]);
-            const auto fineZBounds = aggregateBounds(
-                coarseZ, localFineNodes[2], localCoarseNodes[2], coarseningRate[2]);
+            const auto fineXBounds = numericInterpolationOrder == 0
+                ? aggregateBounds(coarseX, localFineNodes[0], localCoarseNodes[0], coarseningRate[0])
+                : linearSupportBounds(coarseX, localFineNodes[0], localCoarseNodes[0], coarseningRate[0]);
+            const auto fineYBounds = numericInterpolationOrder == 0
+                ? aggregateBounds(coarseY, localFineNodes[1], localCoarseNodes[1], coarseningRate[1])
+                : linearSupportBounds(coarseY, localFineNodes[1], localCoarseNodes[1], coarseningRate[1]);
+            const auto fineZBounds = numericInterpolationOrder == 0
+                ? aggregateBounds(coarseZ, localFineNodes[2], localCoarseNodes[2], coarseningRate[2])
+                : linearSupportBounds(coarseZ, localFineNodes[2], localCoarseNodes[2], coarseningRate[2]);
             const size_t firstFineNode =
                 static_cast<size_t>(fineXBounds[0]) +
                 static_cast<size_t>(localFineNodes[0]) *
@@ -864,19 +936,24 @@ class StructuredRAPKernel {
                 size_t contribution = contributionBegin;
                 if (useDirectOffsets) {
                   for (; contribution + 3 < contributionEnd; contribution += 4) {
-                    sum0 += localA.values(
-                        firstAValue + reverseDirectAValueOffsets(contribution));
-                    sum1 += localA.values(
-                        firstAValue + reverseDirectAValueOffsets(contribution + 1));
-                    sum2 += localA.values(
-                        firstAValue + reverseDirectAValueOffsets(contribution + 2));
-                    sum3 += localA.values(
-                        firstAValue + reverseDirectAValueOffsets(contribution + 3));
+                    sum0 += weightedAValue<numericInterpolationOrder>(
+                        localA, firstAValue + reverseDirectAValueOffsets(contribution),
+                        reverseCoefficients, contribution);
+                    sum1 += weightedAValue<numericInterpolationOrder>(
+                        localA, firstAValue + reverseDirectAValueOffsets(contribution + 1),
+                        reverseCoefficients, contribution + 1);
+                    sum2 += weightedAValue<numericInterpolationOrder>(
+                        localA, firstAValue + reverseDirectAValueOffsets(contribution + 2),
+                        reverseCoefficients, contribution + 2);
+                    sum3 += weightedAValue<numericInterpolationOrder>(
+                        localA, firstAValue + reverseDirectAValueOffsets(contribution + 3),
+                        reverseCoefficients, contribution + 3);
                   }
                   local_scalar_type sum = (sum0 + sum1) + (sum2 + sum3);
                   for (; contribution < contributionEnd; ++contribution)
-                    sum += localA.values(
-                        firstAValue + reverseDirectAValueOffsets(contribution));
+                    sum += weightedAValue<numericInterpolationOrder>(
+                        localA, firstAValue + reverseDirectAValueOffsets(contribution),
+                        reverseCoefficients, contribution);
                   localAc.values(acRowBegin + acOffset) = sum;
                 } else {
                   for (; contribution + 3 < contributionEnd; contribution += 4) {
@@ -896,14 +973,18 @@ class StructuredRAPKernel {
                         (firstFineNode + reverseFineNodeOffsets(contribution + 3)) *
                             numDofs +
                         rowDof;
-                    sum0 += localA.values(localA.graph.row_map(aRow0) +
-                                          reverseARowEntryOffsets(contribution));
-                    sum1 += localA.values(localA.graph.row_map(aRow1) +
-                                          reverseARowEntryOffsets(contribution + 1));
-                    sum2 += localA.values(localA.graph.row_map(aRow2) +
-                                          reverseARowEntryOffsets(contribution + 2));
-                    sum3 += localA.values(localA.graph.row_map(aRow3) +
-                                          reverseARowEntryOffsets(contribution + 3));
+                    sum0 += weightedAValue<numericInterpolationOrder>(
+                        localA, localA.graph.row_map(aRow0) + reverseARowEntryOffsets(contribution),
+                        reverseCoefficients, contribution);
+                    sum1 += weightedAValue<numericInterpolationOrder>(
+                        localA, localA.graph.row_map(aRow1) + reverseARowEntryOffsets(contribution + 1),
+                        reverseCoefficients, contribution + 1);
+                    sum2 += weightedAValue<numericInterpolationOrder>(
+                        localA, localA.graph.row_map(aRow2) + reverseARowEntryOffsets(contribution + 2),
+                        reverseCoefficients, contribution + 2);
+                    sum3 += weightedAValue<numericInterpolationOrder>(
+                        localA, localA.graph.row_map(aRow3) + reverseARowEntryOffsets(contribution + 3),
+                        reverseCoefficients, contribution + 3);
                   }
                   local_scalar_type sum = (sum0 + sum1) + (sum2 + sum3);
                   for (; contribution < contributionEnd; ++contribution) {
@@ -911,16 +992,22 @@ class StructuredRAPKernel {
                         (firstFineNode + reverseFineNodeOffsets(contribution)) *
                             numDofs +
                         rowDof;
-                    sum += localA.values(localA.graph.row_map(aRow) +
-                                         reverseARowEntryOffsets(contribution));
+                    sum += weightedAValue<numericInterpolationOrder>(
+                        localA, localA.graph.row_map(aRow) + reverseARowEntryOffsets(contribution),
+                        reverseCoefficients, contribution);
                   }
                   localAc.values(acRowBegin + acOffset) = sum;
                 }
               }
             }
-          });
-      executionSpace.fence(
-          "StructuredRAP: constant stencil product complete");
+            });
+        executionSpace.fence(
+            "StructuredRAP: structured product complete");
+      };
+      if (interpolationOrder == 0)
+        runNumeric(std::integral_constant<int, 0>{});
+      else
+        runNumeric(std::integral_constant<int, 1>{});
     }
 
     if (!Ac.isFillComplete()) {

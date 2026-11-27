@@ -57,7 +57,8 @@ buildStructuredKernelData(const std::string& matrixType,
                           const GlobalOrdinal nx,
                           const GlobalOrdinal ny,
                           const GlobalOrdinal nz,
-                          const int coarseningRate) {
+                          const int coarseningRate,
+                          const int interpolationOrder) {
   using SC                    = Scalar;
   using LO                    = LocalOrdinal;
   using GO                    = GlobalOrdinal;
@@ -162,7 +163,7 @@ buildStructuredKernelData(const std::string& matrixType,
       "aggregation: output type",
       Teuchos::ParameterEntry(std::string("CrsGraph")));
   aggregation->SetParameter(
-      "aggregation: coarsening order", Teuchos::ParameterEntry(0));
+      "aggregation: coarsening order", Teuchos::ParameterEntry(interpolationOrder));
   aggregation->SetParameter(
       "aggregation: coarsening rate",
       Teuchos::ParameterEntry(std::string("{") +
@@ -197,7 +198,8 @@ template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, GlobalOrdinal, Node> >
 computeStructuredRAP(
     const StructuredKernelData<Scalar, LocalOrdinal, GlobalOrdinal, Node>& data,
-    const int coarseningRate) {
+    const int coarseningRate,
+    const int interpolationOrder) {
   using SC         = Scalar;
   using LO         = LocalOrdinal;
   using GO         = GlobalOrdinal;
@@ -210,7 +212,7 @@ computeStructuredRAP(
       rapFactory.DetectFineStencil(*data.A, data.numDimensions,
                                    data.fineNodesPerDim);
   const typename RAPFactory::StructuredGraphSpec graphSpec =
-      rapFactory.DeriveCoarseRAPStencil(fineStencil, 0);
+      rapFactory.DeriveCoarseRAPStencil(fineStencil, interpolationOrder);
 
   Teuchos::RCP<Matrix> Ac;
   rapFactory.GetStructuredGraph(Ac, data.P, data.coarseNodesPerDim,
@@ -220,7 +222,7 @@ computeStructuredRAP(
   Teuchos::RCP<Teuchos::ParameterList> kernelParams =
       Teuchos::rcp(new Teuchos::ParameterList());
   MueLu::Details::StructuredRAPKernel<SC, LO, GO, NO>::Compute(
-      *data.A, *data.P, *Ac, fineStencil, 0, data.fineNodesPerDim,
+      *data.A, *data.P, *Ac, fineStencil, interpolationOrder, data.fineNodesPerDim,
       data.coarseNodesPerDim, rate, kernelParams);
   return Ac;
 }
@@ -273,13 +275,14 @@ relativeFrobeniusError(
 }
 
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
-void compareConstantStructuredProblem(const std::string& matrixType,
-                                      const GlobalOrdinal nx,
-                                      const GlobalOrdinal ny,
-                                      const GlobalOrdinal nz,
-                                      const int coarseningRate,
-                                      Teuchos::FancyOStream& out,
-                                      bool& success) {
+void compareStructuredProblem(const std::string& matrixType,
+                              const GlobalOrdinal nx,
+                              const GlobalOrdinal ny,
+                              const GlobalOrdinal nz,
+                              const int coarseningRate,
+                              const int interpolationOrder,
+                              Teuchos::FancyOStream& out,
+                              bool& success) {
   using SC        = Scalar;
   using LO        = LocalOrdinal;
   using GO        = GlobalOrdinal;
@@ -288,9 +291,10 @@ void compareConstantStructuredProblem(const std::string& matrixType,
 
   const StructuredKernelData<SC, LO, GO, NO> data =
       buildStructuredKernelData<SC, LO, GO, NO>(
-          matrixType, nx, ny, nz, coarseningRate);
+          matrixType, nx, ny, nz, coarseningRate, interpolationOrder);
   const Teuchos::RCP<Xpetra::Matrix<SC, LO, GO, NO> > structuredAc =
-      computeStructuredRAP<SC, LO, GO, NO>(data, coarseningRate);
+      computeStructuredRAP<SC, LO, GO, NO>(data, coarseningRate,
+                                           interpolationOrder);
   const Teuchos::RCP<Xpetra::Matrix<SC, LO, GO, NO> > xpetraAc =
       computeXpetraRAP<SC, LO, GO, NO>(data);
 
@@ -305,6 +309,7 @@ void compareConstantStructuredProblem(const std::string& matrixType,
     out << "x" << nz;
   out
       << ", coarsening rate " << coarseningRate
+      << ", interpolation order " << interpolationOrder
       << ": relative Frobenius error = " << error << std::endl;
   TEST_COMPARE(error, <=, tolerance);
 }
@@ -335,8 +340,8 @@ TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(
   if (!canRunStructuredKernelTest<NO>(out))
     return;
 
-  compareConstantStructuredProblem<SC, LO, GO, NO>(
-      "Laplace1D", 13, -1, -1, 3, out, success);
+  compareStructuredProblem<SC, LO, GO, NO>(
+      "Laplace1D", 13, -1, -1, 3, 0, out, success);
 }
 
 TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(
@@ -350,8 +355,8 @@ TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(
   if (!canRunStructuredKernelTest<NO>(out))
     return;
 
-  compareConstantStructuredProblem<SC, LO, GO, NO>(
-      "Laplace2D", 13, 10, -1, 3, out, success);
+  compareStructuredProblem<SC, LO, GO, NO>(
+      "Laplace2D", 13, 10, -1, 3, 0, out, success);
 }
 
 TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(
@@ -365,8 +370,8 @@ TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(
   if (!canRunStructuredKernelTest<NO>(out))
     return;
 
-  compareConstantStructuredProblem<SC, LO, GO, NO>(
-      "Laplace3D", 8, 7, 6, 2, out, success);
+  compareStructuredProblem<SC, LO, GO, NO>(
+      "Laplace3D", 8, 7, 6, 2, 0, out, success);
 }
 
 TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(
@@ -380,14 +385,14 @@ TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(
   if (!canRunStructuredKernelTest<NO>(out))
     return;
 
-  compareConstantStructuredProblem<SC, LO, GO, NO>(
-      "Elasticity2D", 12, 12, -1, 3, out, success);
-  compareConstantStructuredProblem<SC, LO, GO, NO>(
-      "Elasticity2D", 13, 10, -1, 3, out, success);
-  compareConstantStructuredProblem<SC, LO, GO, NO>(
-      "Elasticity2D", 11, 12, -1, 2, out, success);
-  compareConstantStructuredProblem<SC, LO, GO, NO>(
-      "Elasticity2D", 14, 11, -1, 4, out, success);
+  compareStructuredProblem<SC, LO, GO, NO>(
+      "Elasticity2D", 12, 12, -1, 3, 0, out, success);
+  compareStructuredProblem<SC, LO, GO, NO>(
+      "Elasticity2D", 13, 10, -1, 3, 0, out, success);
+  compareStructuredProblem<SC, LO, GO, NO>(
+      "Elasticity2D", 11, 12, -1, 2, 0, out, success);
+  compareStructuredProblem<SC, LO, GO, NO>(
+      "Elasticity2D", 14, 11, -1, 4, 0, out, success);
 }
 
 TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(
@@ -401,8 +406,83 @@ TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(
   if (!canRunStructuredKernelTest<NO>(out))
     return;
 
-  compareConstantStructuredProblem<SC, LO, GO, NO>(
-      "Elasticity3D", 7, 6, 5, 2, out, success);
+  compareStructuredProblem<SC, LO, GO, NO>(
+      "Elasticity3D", 7, 6, 5, 2, 0, out, success);
+}
+
+TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(
+    StructuredKernel, LinearLaplace1DMatchesXpetra,
+    Scalar, LocalOrdinal, GlobalOrdinal, Node) {
+#include "MueLu_UseShortNames.hpp"
+  MUELU_TESTING_SET_OSTREAM;
+  MUELU_TESTING_LIMIT_SCOPE(Scalar, GlobalOrdinal, Node);
+  out << "version: " << MueLu::Version() << std::endl;
+
+  if (!canRunStructuredKernelTest<NO>(out))
+    return;
+
+  compareStructuredProblem<SC, LO, GO, NO>(
+      "Laplace1D", 13, -1, -1, 3, 1, out, success);
+}
+
+TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(
+    StructuredKernel, LinearLaplace2DMatchesXpetra,
+    Scalar, LocalOrdinal, GlobalOrdinal, Node) {
+#include "MueLu_UseShortNames.hpp"
+  MUELU_TESTING_SET_OSTREAM;
+  MUELU_TESTING_LIMIT_SCOPE(Scalar, GlobalOrdinal, Node);
+  out << "version: " << MueLu::Version() << std::endl;
+
+  if (!canRunStructuredKernelTest<NO>(out))
+    return;
+
+  compareStructuredProblem<SC, LO, GO, NO>(
+      "Laplace2D", 10, 10, -1, 2, 1, out, success);
+}
+
+TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(
+    StructuredKernel, LinearLaplace3DMatchesXpetra,
+    Scalar, LocalOrdinal, GlobalOrdinal, Node) {
+#include "MueLu_UseShortNames.hpp"
+  MUELU_TESTING_SET_OSTREAM;
+  MUELU_TESTING_LIMIT_SCOPE(Scalar, GlobalOrdinal, Node);
+  out << "version: " << MueLu::Version() << std::endl;
+
+  if (!canRunStructuredKernelTest<NO>(out))
+    return;
+
+  compareStructuredProblem<SC, LO, GO, NO>(
+      "Laplace3D", 8, 7, 6, 2, 1, out, success);
+}
+
+TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(
+    StructuredKernel, LinearElasticity2DMatchesXpetra,
+    Scalar, LocalOrdinal, GlobalOrdinal, Node) {
+#include "MueLu_UseShortNames.hpp"
+  MUELU_TESTING_SET_OSTREAM;
+  MUELU_TESTING_LIMIT_SCOPE(Scalar, GlobalOrdinal, Node);
+  out << "version: " << MueLu::Version() << std::endl;
+
+  if (!canRunStructuredKernelTest<NO>(out))
+    return;
+
+  compareStructuredProblem<SC, LO, GO, NO>(
+      "Elasticity2D", 11, 10, -1, 2, 1, out, success);
+}
+
+TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(
+    StructuredKernel, LinearElasticity3DMatchesXpetra,
+    Scalar, LocalOrdinal, GlobalOrdinal, Node) {
+#include "MueLu_UseShortNames.hpp"
+  MUELU_TESTING_SET_OSTREAM;
+  MUELU_TESTING_LIMIT_SCOPE(Scalar, GlobalOrdinal, Node);
+  out << "version: " << MueLu::Version() << std::endl;
+
+  if (!canRunStructuredKernelTest<NO>(out))
+    return;
+
+  compareStructuredProblem<SC, LO, GO, NO>(
+      "Elasticity3D", 7, 6, 5, 2, 1, out, success);
 }
 
 #define MUELU_ETI_GROUP(Scalar, LO, GO, Node)              \
@@ -420,6 +500,21 @@ TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(
       Scalar, LO, GO, Node)                                \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(                    \
       StructuredKernel, ConstantElasticity3DMatchesXpetra, \
+      Scalar, LO, GO, Node)                                \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(                    \
+      StructuredKernel, LinearLaplace1DMatchesXpetra,      \
+      Scalar, LO, GO, Node)                                \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(                    \
+      StructuredKernel, LinearLaplace2DMatchesXpetra,      \
+      Scalar, LO, GO, Node)                                \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(                    \
+      StructuredKernel, LinearLaplace3DMatchesXpetra,      \
+      Scalar, LO, GO, Node)                                \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(                    \
+      StructuredKernel, LinearElasticity2DMatchesXpetra,   \
+      Scalar, LO, GO, Node)                                \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(                    \
+      StructuredKernel, LinearElasticity3DMatchesXpetra,   \
       Scalar, LO, GO, Node)
 
 #include <MueLu_ETI_4arg.hpp>

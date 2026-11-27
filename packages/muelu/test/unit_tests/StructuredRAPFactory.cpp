@@ -560,6 +560,17 @@ TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(StructuredRAPFactory, LinearLaplace2D, Scalar,
                                              -1, -1, -1, 1, "{2}", out);
 }  // LinearLaplace2D test
 
+TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(StructuredRAPFactory, LinearLaplace1D, Scalar, LocalOrdinal, GlobalOrdinal, Node) {
+#include "MueLu_UseShortNames.hpp"
+  MUELU_TESTING_SET_OSTREAM;
+  MUELU_TESTING_LIMIT_SCOPE(Scalar, GlobalOrdinal, Node);
+  out << "version: " << MueLu::Version() << std::endl;
+
+  RCP<const Teuchos::Comm<int> > comm = TestHelpers::Parameters::getDefaultComm();
+  runStructuredRAPComparison<SC, LO, GO, NO>("Laplace1D", 10 * comm->getSize(), -1, -1,
+                                             comm->getSize(), -1, -1, 1, "{2}", out);
+}  // LinearLaplace1D test
+
 TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(StructuredRAPFactory, ConstantLaplace3D, Scalar, LocalOrdinal, GlobalOrdinal, Node) {
 #include "MueLu_UseShortNames.hpp"
   MUELU_TESTING_SET_OSTREAM;
@@ -590,6 +601,16 @@ TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(StructuredRAPFactory, ConstantElasticity2D, Sc
                                              -1, -1, -1, 0, "{3}", out);
 }  // ConstantElasticity2D test
 
+TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(StructuredRAPFactory, LinearElasticity2D, Scalar, LocalOrdinal, GlobalOrdinal, Node) {
+#include "MueLu_UseShortNames.hpp"
+  MUELU_TESTING_SET_OSTREAM;
+  MUELU_TESTING_LIMIT_SCOPE(Scalar, GlobalOrdinal, Node);
+  out << "version: " << MueLu::Version() << std::endl;
+
+  runStructuredRAPComparison<SC, LO, GO, NO>("Elasticity2D", 10, 10, -1,
+                                             -1, -1, -1, 1, "{2}", out);
+}  // LinearElasticity2D test
+
 TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(StructuredRAPFactory, ConstantElasticity3D, Scalar, LocalOrdinal, GlobalOrdinal, Node) {
 #include "MueLu_UseShortNames.hpp"
   MUELU_TESTING_SET_OSTREAM;
@@ -614,12 +635,14 @@ TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(StructuredRAPFactory, LinearElasticity3D, Scal
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(StructuredRAPFactory, Constructor, Scalar, LO, GO, Node)           \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(StructuredRAPFactory, ConstantLaplace1D, Scalar, LO, GO, Node)     \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(StructuredRAPFactory, ConstantLaplace2D, Scalar, LO, GO, Node)     \
-  /* TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(StructuredRAPFactory, LinearLaplace2D, Scalar, LO, GO, Node) */ \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(StructuredRAPFactory, ConstantLaplace3D, Scalar, LO, GO, Node)     \
-  /* TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(StructuredRAPFactory, LinearLaplace3D, Scalar, LO, GO, Node) */ \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(StructuredRAPFactory, ConstantElasticity2D, Scalar, LO, GO, Node)  \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(StructuredRAPFactory, ConstantElasticity3D, Scalar, LO, GO, Node)  \
-  /* TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(StructuredRAPFactory, LinearElasticity3D, Scalar, LO, GO, Node) */
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(StructuredRAPFactory, LinearLaplace1D, Scalar, LO, GO, Node)       \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(StructuredRAPFactory, LinearLaplace2D, Scalar, LO, GO, Node)       \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(StructuredRAPFactory, LinearLaplace3D, Scalar, LO, GO, Node)       \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(StructuredRAPFactory, LinearElasticity2D, Scalar, LO, GO, Node)    \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(StructuredRAPFactory, LinearElasticity3D, Scalar, LO, GO, Node)
 
 #include <MueLu_ETI_4arg.hpp>
 
